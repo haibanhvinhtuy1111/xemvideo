@@ -36,7 +36,8 @@ const IGNORE_DOMAINS = [
   "jsdelivr.net",
   "cdnjs.cloudflare.com",
   "fonts.googleapis.com",
-  "fonts.gstatic.com"
+  "fonts.gstatic.com",
+  "jquery.com"
 ];
 
 export async function OPTIONS() {
@@ -69,10 +70,8 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   }
 }
 
-// Tải HTML có hỗ trợ Proxy vượt Cloudflare nếu IP Vercel bị chặn (403/503)
 async function fetchHtmlWithFallback(targetUrl, headers) {
   let status = 0;
-  // 1. Thử tải trực tiếp
   try {
     const res = await fetchWithTimeout(targetUrl, { headers }, 7000);
     status = res.status;
@@ -84,16 +83,15 @@ async function fetchHtmlWithFallback(targetUrl, headers) {
     }
   } catch (_) {}
 
-  // 2. Fallback qua Proxy nếu Cloudflare chặn IP của Vercel
   const proxies = [
     (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
+    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`
   ];
 
   for (const buildProxy of proxies) {
     try {
-      const proxyUrl = buildProxy(targetUrl);
-      const res = await fetchWithTimeout(proxyUrl, {}, 8000);
+      const res = await fetchWithTimeout(buildProxy(targetUrl), {}, 8000);
       if (res.ok) {
         const text = await res.text();
         if (text && text.length > 500 && !text.includes("Just a moment...")) {
@@ -104,36 +102,6 @@ async function fetchHtmlWithFallback(targetUrl, headers) {
   }
 
   return { html: "", via: "failed", status };
-}
-
-function unpackPacker(html = "") {
-  let unpacked = "";
-  const packerRegex =
-    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\.split\(['"]\|['"]\)/gi;
-  let m;
-  while ((m = packerRegex.exec(html)) !== null) {
-    try {
-      let p = m[2];
-      const a = parseInt(m[3], 10);
-      let c = parseInt(m[4], 10);
-      const k = m[6].split("|");
-      const encodeBase = (num) => {
-        const chars =
-          "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        return (
-          (num < a ? "" : encodeBase(Math.floor(num / a))) +
-          (num % a > 35 ? String.fromCharCode((num % a) + 29) : chars[num % a])
-        );
-      };
-      while (c--) {
-        if (k[c]) {
-          p = p.replace(new RegExp("\\b" + encodeBase(c) + "\\b", "g"), k[c]);
-        }
-      }
-      unpacked += "\n" + p;
-    } catch (_) {}
-  }
-  return unpacked;
 }
 
 function normalizeUrl(raw = "", baseDomain = "") {
@@ -158,7 +126,6 @@ function normalizeUrl(raw = "", baseDomain = "") {
   return u;
 }
 
-// Chỉ lọc bỏ file ảnh, font, giao diện tĩnh (KHÔNG chặn .php, .html)
 function isStaticAsset(url = "") {
   const clean = url.split("?")[0].toLowerCase();
   if (
@@ -174,8 +141,9 @@ function isStaticAsset(url = "") {
   );
 }
 
+// Bóc tách chuyên sâu cho Viet69 (RetroTube) & WordPress Video Themes
 function extractMedia(html = "", baseDomain = "") {
-  if (!html) return { streams: [], iframes: [] };
+  if (!html) return { streams: [], iframes: [], playerSnippet: "" };
 
   let buffer = html
     .replace(/\\\//g, "/")
@@ -189,21 +157,16 @@ function extractMedia(html = "", baseDomain = "") {
     .replace(/\\u0027/gi, "'")
     .replace(/&amp;/g, "&");
 
-  buffer += "\n" + unpackPacker(buffer);
-
-  // Giải mã mọi chuỗi Base64 tiềm năng trong mã nguồn
-  const b64Regex = /["']([A-Za-z0-9+/=]{24,})["']/g;
+  // Giải mã mọi chuỗi Base64 trong mã nguồn (bao gồm cả data-src/data-link của Server #1, Server #2)
+  const b64Regex = /([A-Za-z0-9+/]{28,}={0,2})/g;
   let b64Match;
   while ((b64Match = b64Regex.exec(buffer)) !== null) {
     const candidate = b64Match[1];
-    if (candidate.includes("http") || candidate.includes("/")) continue;
     try {
       const decoded = Buffer.from(candidate, "base64").toString("utf-8");
       if (
-        decoded.includes("http") ||
-        decoded.includes("<iframe") ||
-        decoded.includes(".m3u8") ||
-        decoded.includes(".mp4")
+        /https?:\/\/|<iframe|\.m3u8|\.mp4/i.test(decoded) &&
+        !/[\x00-\x08\x0E-\x1F]/.test(decoded)
       ) {
         buffer += "\n" + decoded;
       }
@@ -212,8 +175,24 @@ function extractMedia(html = "", baseDomain = "") {
 
   const streams = new Set();
   const iframes = new Set();
+  const baseHost = baseDomain
+    ? new URL(baseDomain).hostname.replace(/^www\./, "")
+    : "";
 
-  const addCandidate = (rawUrl, isFromIframeTag = false) => {
+  const isInternalPageLink = (u) => {
+    try {
+      const uObj = new URL(u);
+      const uHost = uObj.hostname.replace(/^www\./, "");
+      if (uHost !== baseHost) return false;
+      return !/(?:embed|player|play|stream|video|ajax|\?)/i.test(
+        uObj.pathname + uObj.search
+      );
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const addCandidate = (rawUrl, trustAsIframe = false) => {
     const u = normalizeUrl(rawUrl, baseDomain);
     if (!u || isStaticAsset(u)) return;
     const lower = u.toLowerCase();
@@ -228,69 +207,106 @@ function extractMedia(html = "", baseDomain = "") {
       return;
     }
 
-    // Nếu lấy trực tiếp từ thẻ <iframe> thì nhận luôn
-    if (isFromIframeTag) {
-      if (!lower.includes("/wp-admin/") && !lower.includes("/wp-login")) {
-        iframes.add(u);
-      }
+    if (
+      lower.includes("/wp-json/") ||
+      lower.includes("/wp-admin/") ||
+      lower.includes("/wp-login") ||
+      lower.includes("/wp-content/themes/") ||
+      lower.includes("/wp-content/plugins/") ||
+      lower.includes("/wp-includes/") ||
+      lower.includes("/feed/") ||
+      lower.includes("/category/") ||
+      lower.includes("/tag/")
+    ) {
       return;
     }
 
-    // Nếu lấy từ biến JS / thuộc tính data-* thì kiểm tra từ khóa player
+    if (trustAsIframe && !isInternalPageLink(u)) {
+      iframes.add(u);
+      return;
+    }
+
     if (
-      /(?:embed|\/e\/|\/v\/|\/play|player|stream|video\.g\?token=|hydrax|abyss|dood|ok\.ru|helvid|vhstream|goostream|69vn|viet69.*\/(?:embed|play|v))/i.test(
+      /(?:embed|\/e\/|\/v\/|\/play|player|stream|video|hydrax|abyss|dood|ok\.ru|helvid|vhstream|goostream|blogger\.com|blogspot|clip|watch|token=|id=)/i.test(
         lower
-      )
+      ) &&
+      !isInternalPageLink(u)
     ) {
       iframes.add(u);
     }
   };
 
-  // 1. Quét tất cả thẻ <iframe> (hỗ trợ cả thuộc tính có ngoặc kép lẫn không ngoặc kép do nén HTML)
-  const iframeTags = buffer.match(/<iframe\b[^>]*>/gi) || [];
-  const iframeAttrs = [
+  // 1. Khoanh vùng khu vực Player và cụm nút Server #1 / Server #2 của Viet69
+  let playerSnippet = "";
+  const playerZoneRegex =
+    /(?:class=["'][^"']*(?:responsive-player|video-player|player-embed|video-embed|entry-player|server-list|list-server)[^"']*["']|Server\s*#?1)[\s\S]{0,6000}/i;
+  const zoneMatch = buffer.match(playerZoneRegex);
+  if (zoneMatch) {
+    const zoneHtml = zoneMatch[0];
+    playerSnippet = zoneHtml.slice(0, 600);
+    // Mọi URL nằm trong vùng player/Server #1 đều được ưu tiên nhận làm luồng phát
+    const zoneUrls =
+      zoneHtml.match(/https?:\/\/[^\s"'<>\\]+|\/\/[^\s"'<>\\]+/gi) || [];
+    for (const u of zoneUrls) {
+      addCandidate(u, true);
+    }
+  }
+
+  // 2. Quét tất cả thẻ <iframe>, <embed>, <object>, <source>
+  const embedTags =
+    buffer.match(/<(?:iframe|embed|object|video|source)\b[^>]*>/gi) || [];
+  const attrs = [
     "data-litespeed-src",
     "data-lazy-src",
     "data-wpfc-original-src",
     "data-src",
     "data-original",
-    "src"
+    "data-url",
+    "data-link",
+    "data-embed",
+    "src",
+    "data"
   ];
-  for (const tag of iframeTags) {
-    for (const attr of iframeAttrs) {
-      const attrMatch = tag.match(
+  for (const tag of embedTags) {
+    for (const attr of attrs) {
+      const m = tag.match(
         new RegExp(`\\b${attr}\\s*=\\s*(?:["']([^"']+)["']|([^\\s>"']+))`, "i")
       );
-      const val = attrMatch ? attrMatch[1] || attrMatch[2] : "";
-      if (val) {
-        addCandidate(val, true);
-      }
+      const val = m ? m[1] || m[2] : "";
+      if (val) addCandidate(val, true);
     }
   }
 
-  // 2. Quét thuộc tính data-* trên các thẻ div/player
+  // 3. Quét tất cả thuộc tính data-* trên các nút chuyển Server (Server #1, Server #2...)
   const dataAttrRegex =
-    /(?:data-video|data-embed|data-iframe|data-player|data-stream|data-file|data-url|data-link|data-src|data-lazy-src|data-litespeed-src)\s*=\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
+    /\bdata-(?:video|embed|iframe|player|stream|file|url|link|src|lazy-src|litespeed-src|server|hash)\s*=\s*["']([^"']+)["']/gi;
   let match;
   while ((match = dataAttrRegex.exec(buffer)) !== null) {
-    addCandidate(match[1], false);
+    addCandidate(match[1], true);
   }
 
-  // 3. Quét thẻ <meta> chứa luồng video
+  // 4. Quét sự kiện onclick trên nút Server (ví dụ: onclick="changeServer('https://...')")
+  const onclickRegex =
+    /onclick\s*=\s*["'][^"']*?(https?:\/\/[^"'\s()]+|\/\/[^"'\s()]+)[^"']*["']/gi;
+  while ((match = onclickRegex.exec(buffer)) !== null) {
+    addCandidate(match[1], true);
+  }
+
+  // 5. Quét thẻ <meta> (og:video, twitter:player, embedUrl, contentUrl)
   const metaRegex =
     /<meta[^>]+(?:property|name|itemprop)\s*=\s*["'](?:og:video(?::url|:secure_url)?|twitter:player|embedUrl|contentUrl)["'][^>]+content\s*=\s*["']([^"']+)["']/gi;
   while ((match = metaRegex.exec(buffer)) !== null) {
     addCandidate(match[1], true);
   }
 
-  // 4. Quét biến cấu hình JS (file, src, embed_url, video_url, sources...)
+  // 6. Quét biến JS cấu hình player
   const jsConfigRegex =
-    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|contentUrl|video_url|videoUrl|stream_url|iframe_url|hls|mp4)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
+    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|contentUrl|video_url|videoUrl|stream_url|iframe_url|hls|mp4|link)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
   while ((match = jsConfigRegex.exec(buffer)) !== null) {
     addCandidate(match[1], false);
   }
 
-  // 5. Quét trực tiếp mọi đường dẫn .m3u8 và .mp4
+  // 7. Quét trực tiếp mọi link .m3u8 và .mp4
   (
     buffer.match(
       /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\]*)?/gi
@@ -299,7 +315,8 @@ function extractMedia(html = "", baseDomain = "") {
 
   return {
     streams: [...streams],
-    iframes: [...iframes]
+    iframes: [...iframes],
+    playerSnippet
   };
 }
 
@@ -317,6 +334,22 @@ function extractWpPostId(html = "") {
     if (m && m[1]) return m[1];
   }
   return null;
+}
+
+// Tự động tìm các action AJAX trong mã nguồn trang (phục vụ nút Server #1 / Server #2)
+function extractAjaxActions(html = "") {
+  const actions = new Set([
+    "doo_player_ajax",
+    "halim_ajax_player",
+    "get_player",
+    "load_player"
+  ]);
+  const regex = /action\s*[:=]\s*["']([a-zA-Z0-9_-]*(?:player|embed|video|server|stream)[a-zA-Z0-9_-]*)["']/gi;
+  let m;
+  while ((m = regex.exec(html)) !== null) {
+    actions.add(m[1]);
+  }
+  return [...actions];
 }
 
 export async function GET(req) {
@@ -353,9 +386,6 @@ export async function GET(req) {
   const baseHost = new URL(baseDomain).hostname.replace(/^www\./, "");
   const reqHeaders = { ...BROWSER_HEADERS, Referer: `${baseDomain}/` };
 
-  // =================================================================
-  // TRƯỜNG HỢP 1: LẤY CHI TIẾT VIDEO THEO SLUG (?slug=...)
-  // =================================================================
   if (slug) {
     const cleanSlug = slug.replace(/^\/+|\/+$/g, "");
     const localVideo = data.find(
@@ -375,7 +405,7 @@ export async function GET(req) {
       const allIframes = [];
       const debugInfo = { baseDomain, wpStatus: 0, htmlVia: "none" };
 
-      // BƯỚC 1: Lấy qua WordPress REST API
+      // 1. Lấy thông tin bài viết từ WordPress REST API
       try {
         const wpRes = await fetchWithTimeout(
           `${baseDomain}/wp-json/wp/v2/posts?slug=${encodeURIComponent(cleanSlug)}&_embed`,
@@ -403,7 +433,7 @@ export async function GET(req) {
         debugInfo.wpError = e.message;
       }
 
-      // BƯỚC 2: Tải trang HTML bài viết (tự động dùng Proxy nếu Cloudflare chặn IP Vercel)
+      // 2. Tải trang HTML chi tiết để lấy vùng .responsive-player và Server #1 / Server #2
       const { html: pageHtml, via, status: htmlStatus } =
         await fetchHtmlWithFallback(postLink, reqHeaders);
       debugInfo.htmlVia = via;
@@ -429,18 +459,17 @@ export async function GET(req) {
         const media = extractMedia(pageHtml, baseDomain);
         allStreams.push(...media.streams);
         allIframes.push(...media.iframes);
+        if (media.playerSnippet) {
+          debugInfo.playerSnippet = media.playerSnippet;
+        }
       }
 
-      // BƯỚC 3: Gọi AJAX Player của WordPress nếu vẫn chưa thấy stream
+      // 3. Nếu chưa có luồng, tự động gọi các action AJAX tìm thấy trong trang
       if (postId && allStreams.length === 0 && allIframes.length === 0) {
-        const ajaxActions = [
-          `action=doo_player_ajax&post=${postId}&nume=1&type=movie`,
-          `action=halim_ajax_player&post_id=${postId}&episode=1&server=1`,
-          `action=get_player&id=${postId}`,
-          `action=wp_script_get_player&post_id=${postId}`
-        ];
-        for (const body of ajaxActions) {
+        const actions = extractAjaxActions(pageHtml);
+        for (const act of actions) {
           if (allStreams.length > 0 || allIframes.length > 0) break;
+          const body = `action=${act}&post=${postId}&post_id=${postId}&id=${postId}&nume=1&server=1&type=movie`;
           try {
             const ajaxRes = await fetchWithTimeout(
               `${baseDomain}/wp-admin/admin-ajax.php`,
@@ -454,7 +483,7 @@ export async function GET(req) {
                 },
                 body
               },
-              5000
+              4500
             );
             if (ajaxRes.ok) {
               const ajaxText = await ajaxRes.text();
@@ -466,18 +495,13 @@ export async function GET(req) {
         }
       }
 
-      // BƯỚC 4: Quét xuyên vào Iframe đầu tiên để tìm link .m3u8/.mp4 trực tiếp
+      // 4. Quét xuyên vào Iframe đầu tiên nếu muốn lấy thêm link .m3u8/.mp4 trực tiếp
       if (allStreams.length === 0 && allIframes.length > 0) {
         try {
           const firstIframe = allIframes[0];
           const embedRes = await fetchWithTimeout(
             firstIframe,
-            {
-              headers: {
-                ...BROWSER_HEADERS,
-                Referer: postLink
-              }
-            },
+            { headers: { ...BROWSER_HEADERS, Referer: postLink } },
             5000
           );
           if (embedRes.ok) {
@@ -554,9 +578,7 @@ export async function GET(req) {
     }
   }
 
-  // =================================================================
-  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO THEO TRANG
-  // =================================================================
+  // DANH SÁCH VIDEO THEO TRANG
   try {
     const wpUrl = `${baseDomain}/wp-json/wp/v2/posts?_embed&page=${page}&per_page=${per}${
       q ? `&search=${encodeURIComponent(q)}` : ""
@@ -613,7 +635,6 @@ export async function GET(req) {
     if (html) {
       const items = [];
       const seen = new Set();
-
       const articleBlocks = html.match(/<article[\s\S]*?<\/article>/gi) || [];
       const blocks =
         articleBlocks.length > 0
