@@ -21,25 +21,6 @@ const BROWSER_HEADERS = {
 
 const FALLBACK_THUMB = "https://placehold.co/600x340/18181b/e11d48?text=Video";
 
-const IGNORE_DOMAINS = [
-  "googletagmanager.com",
-  "googlesyndication.com",
-  "google-analytics.com",
-  "doubleclick.net",
-  "facebook.com",
-  "twitter.com",
-  "schema.org",
-  "w3.org",
-  "wordpress.org",
-  "gravatar.com",
-  "cloudflare.com",
-  "jsdelivr.net",
-  "cdnjs.cloudflare.com",
-  "fonts.googleapis.com",
-  "fonts.gstatic.com",
-  "jquery.com"
-];
-
 export async function OPTIONS() {
   return new NextResponse(null, { status: 200, headers: CORS });
 }
@@ -71,14 +52,12 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
 }
 
 async function fetchHtmlWithFallback(targetUrl, headers) {
-  let status = 0;
   try {
     const res = await fetchWithTimeout(targetUrl, { headers }, 7000);
-    status = res.status;
     if (res.ok) {
       const text = await res.text();
       if (text && text.length > 500 && !text.includes("Just a moment...")) {
-        return { html: text, via: "direct", status };
+        return text;
       }
     }
   } catch (_) {}
@@ -93,64 +72,14 @@ async function fetchHtmlWithFallback(targetUrl, headers) {
       const res = await fetchWithTimeout(buildProxy(targetUrl), {}, 8000);
       if (res.ok) {
         const text = await res.text();
-        if (text && text.length > 500 && !text.includes("Just a moment...")) {
-          return { html: text, via: "proxy", status: res.status };
-        }
+        if (text && text.length > 500) return text;
       }
     } catch (_) {}
   }
-
-  return { html: "", via: "failed", status };
-}
-
-function normalizeUrl(raw = "", baseDomain = "") {
-  if (!raw) return "";
-  let u = raw
-    .trim()
-    .replace(/\\\//g, "/")
-    .replace(/&amp;/g, "&")
-    .replace(/^['"]+|['"]+$/g, "");
-  if (u.startsWith("//")) u = `https:${u}`;
-  else if (u.startsWith("/") && baseDomain) u = `${baseDomain}${u}`;
-  if (!u.startsWith("http")) return "";
-  if (
-    u.includes("about:blank") ||
-    u.startsWith("javascript:") ||
-    u.startsWith("data:")
-  ) {
-    return "";
-  }
-  const lower = u.toLowerCase();
-  if (IGNORE_DOMAINS.some((d) => lower.includes(d))) return "";
-  return u;
-}
-
-function isStaticAsset(url = "") {
-  const clean = url.split("?")[0].toLowerCase();
-  if (
-    clean.endsWith(".m3u8") ||
-    clean.endsWith(".mp4") ||
-    clean.endsWith(".webm") ||
-    clean.endsWith(".mov")
-  ) {
-    return false;
-  }
-  return /\.(?:jpg|jpeg|png|webp|gif|svg|ico|css|js|woff2?|ttf|eot|xml)$/i.test(
-    clean
-  );
-}
-
-function decodeBase64Safe(str = "") {
-  try {
-    const decoded = Buffer.from(str.trim(), "base64").toString("utf-8").trim();
-    if (decoded && !/[\x00-\x08\x0E-\x1F]/.test(decoded)) {
-      return decoded;
-    }
-  } catch (_) {}
   return "";
 }
 
-// 1. Tách danh sách các nút Server (.video2-btn) của Viet69
+// Bóc tách nút video2-btn của Viet69
 function extractViet69Servers(html = "") {
   const servers = [];
   const btnRegex =
@@ -162,221 +91,14 @@ function extractViet69Servers(html = "") {
     const typeMatch = tag.match(/\bdata-type=["']([^"']+)["']/i);
     const videoMatch = tag.match(/\bdata-video=["']([^"']+)["']/i);
     if (videoMatch && videoMatch[1]) {
-      const rawVideo = videoMatch[1].trim();
-      const decodedVideo = decodeBase64Safe(rawVideo) || rawVideo;
       servers.push({
         label,
-        dataType: typeMatch ? typeMatch[1].trim() : "",
-        rawVideo,
-        decodedVideo
+        dataType: typeMatch ? typeMatch[1].trim() : "1",
+        dataVideo: videoMatch[1].trim()
       });
     }
   }
   return servers;
-}
-
-// 2. Tìm đoạn script xử lý .video2-btn trong trang để lấy tên action AJAX và mẫu URL nhúng
-function inspectViet69Script(html = "") {
-  const info = {
-    ajaxActions: new Set(),
-    embedDomains: new Set(),
-    scriptSnippet: ""
-  };
-
-  // Bắt đoạn script có chứa video2-btn hoặc data-video
-  const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
-  let m;
-  while ((m = scriptRegex.exec(html)) !== null) {
-    const content = m[1];
-    if (
-      content.includes("video2-btn") ||
-      content.includes("data-video") ||
-      content.includes("data-type")
-    ) {
-      info.scriptSnippet = content.trim().slice(0, 900);
-
-      // Tìm mọi action AJAX trong script này
-      const actRegex = /action\s*[:=]\s*["']([a-zA-Z0-9_-]+)["']/gi;
-      let am;
-      while ((am = actRegex.exec(content)) !== null) {
-        info.ajaxActions.add(am[1]);
-      }
-
-      // Tìm mọi tên miền/đường dẫn nhúng trong script này
-      const urlRegex = /https?:\/\/[^\s"'<>\\`]+/gi;
-      let um;
-      while ((um = urlRegex.exec(content)) !== null) {
-        const u = um[0].replace(/\\\//g, "/");
-        if (!IGNORE_DOMAINS.some((d) => u.includes(d))) {
-          info.embedDomains.add(u);
-        }
-      }
-    }
-  }
-
-  // Quét thêm toàn trang tìm action AJAX trong jQuery.post / $.ajax
-  const globalActRegex =
-    /action\s*:\s*["']([a-zA-Z0-9_-]*(?:video|player|embed|stream|get|load)[a-zA-Z0-9_-]*)["']/gi;
-  while ((m = globalActRegex.exec(html)) !== null) {
-    info.ajaxActions.add(m[1]);
-  }
-
-  return {
-    ajaxActions: [...info.ajaxActions],
-    embedDomains: [...info.embedDomains],
-    scriptSnippet: info.scriptSnippet
-  };
-}
-
-// 3. Bóc tách URL luồng phát (.m3u8, .mp4, iframe) từ bất kỳ chuỗi HTML/JSON nào
-function extractMedia(html = "", baseDomain = "") {
-  if (!html) return { streams: [], iframes: [] };
-
-  let buffer = html
-    .replace(/\\\//g, "/")
-    .replace(/\\x([0-9A-Fa-f]{2})/g, (_, hex) =>
-      String.fromCharCode(parseInt(hex, 16))
-    )
-    .replace(/\\u0026/gi, "&")
-    .replace(/\\u003c/gi, "<")
-    .replace(/\\u003e/gi, ">")
-    .replace(/\\u0022/gi, '"')
-    .replace(/\\u0027/gi, "'")
-    .replace(/&amp;/g, "&");
-
-  // Giải mã mọi chuỗi Base64 trong văn bản
-  const b64Regex = /([A-Za-z0-9+/]{24,}={0,2})/g;
-  let b64Match;
-  while ((b64Match = b64Regex.exec(buffer)) !== null) {
-    const decoded = decodeBase64Safe(b64Match[1]);
-    if (decoded && /https?:\/\/|<iframe|\.m3u8|\.mp4/i.test(decoded)) {
-      buffer += "\n" + decoded;
-    }
-  }
-
-  const streams = new Set();
-  const iframes = new Set();
-  const baseHost = baseDomain
-    ? new URL(baseDomain).hostname.replace(/^www\./, "")
-    : "";
-
-  const isInternalArticle = (u) => {
-    try {
-      const uObj = new URL(u);
-      const uHost = uObj.hostname.replace(/^www\./, "");
-      if (uHost !== baseHost) return false;
-      return !/(?:embed|player|play|stream|video|ajax|\?)/i.test(
-        uObj.pathname + uObj.search
-      );
-    } catch (_) {
-      return false;
-    }
-  };
-
-  const addCandidate = (rawUrl, trustAsIframe = false) => {
-    const u = normalizeUrl(rawUrl, baseDomain);
-    if (!u || isStaticAsset(u)) return;
-    const lower = u.toLowerCase();
-
-    if (
-      lower.includes(".m3u8") ||
-      lower.includes(".mp4") ||
-      lower.includes(".mov") ||
-      lower.includes(".webm")
-    ) {
-      streams.add(u);
-      return;
-    }
-
-    if (
-      lower.includes("/wp-json/") ||
-      lower.includes("/wp-admin/") ||
-      lower.includes("/wp-login") ||
-      lower.includes("/wp-content/themes/") ||
-      lower.includes("/wp-content/plugins/") ||
-      lower.includes("/wp-includes/") ||
-      lower.includes("/feed/") ||
-      lower.includes("/category/") ||
-      lower.includes("/tag/")
-    ) {
-      return;
-    }
-
-    if (trustAsIframe && !isInternalArticle(u)) {
-      iframes.add(u);
-      return;
-    }
-
-    if (
-      /(?:embed|\/e\/|\/v\/|\/play|player|stream|video|hydrax|abyss|dood|ok\.ru|helvid|vhstream|goostream|cd-vs|blogger\.com|blogspot|clip|watch|token=|id=)/i.test(
-        lower
-      ) &&
-      !isInternalArticle(u)
-    ) {
-      iframes.add(u);
-    }
-  };
-
-  // Quét các thẻ <iframe ...>, <embed ...>, <source ...>
-  const embedTags =
-    buffer.match(/<(?:iframe|embed|object|video|source)\b[^>]*>/gi) || [];
-  const attrs = [
-    "data-litespeed-src",
-    "data-lazy-src",
-    "data-wpfc-original-src",
-    "data-src",
-    "data-original",
-    "data-url",
-    "data-link",
-    "src",
-    "data"
-  ];
-  for (const tag of embedTags) {
-    for (const attr of attrs) {
-      const m = tag.match(
-        new RegExp(`\\b${attr}\\s*=\\s*(?:["']([^"']+)["']|([^\\s>"']+))`, "i")
-      );
-      const val = m ? m[1] || m[2] : "";
-      if (val) addCandidate(val, true);
-    }
-  }
-
-  // Quét biến JS cấu hình player
-  const jsConfigRegex =
-    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|contentUrl|video_url|videoUrl|stream_url|iframe_url|hls|mp4|link)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
-  let match;
-  while ((match = jsConfigRegex.exec(buffer)) !== null) {
-    addCandidate(match[1], true);
-  }
-
-  // Quét trực tiếp link .m3u8 và .mp4
-  (
-    buffer.match(
-      /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\]*)?/gi
-    ) || []
-  ).forEach((u) => addCandidate(u, false));
-
-  return {
-    streams: [...streams],
-    iframes: [...iframes]
-  };
-}
-
-function extractWpPostId(html = "") {
-  const patterns = [
-    /\bdata-pid=["'](\d+)["']/i,
-    /\bpostid-(\d+)\b/i,
-    /\bpost-(\d+)\b/i,
-    /\bdata-post(?:-id)?=["']?(\d+)/i,
-    /\bdata-id=["']?(\d+)/i,
-    /["']post_id["']\s*:\s*["']?(\d+)/i,
-    /\?p=(\d+)/i
-  ];
-  for (const p of patterns) {
-    const m = html.match(p);
-    if (m && m[1]) return m[1];
-  }
-  return null;
 }
 
 export async function GET(req) {
@@ -408,14 +130,10 @@ export async function GET(req) {
 
   const rawDomain = (sp.get("domain") || DEFAULT_DOMAIN).trim();
   const baseDomain = (
-    rawDomain.startsWith("http") ? rawDomain : `https://${rawDomain}`
+    rawDomain.startsWith("http`") ? rawDomain : `https://${rawDomain}`
   ).replace(/\/+$/, "");
-  const baseHost = new URL(baseDomain).hostname.replace(/^www\./, "");
   const reqHeaders = { ...BROWSER_HEADERS, Referer: `${baseDomain}/` };
 
-  // =================================================================
-  // TRƯỜNG HỢP 1: LẤY CHI TIẾT VIDEO THEO SLUG (?slug=...)
-  // =================================================================
   if (slug) {
     const cleanSlug = slug.replace(/^\/+|\/+$/g, "");
     const localVideo = data.find(
@@ -428,25 +146,13 @@ export async function GET(req) {
     try {
       let title = cleanSlug;
       let thumbnail = "";
-      let postId = null;
-      let postLink = `${baseDomain}/${cleanSlug}/`;
-      let foundPost = false;
+      const postLink = `${baseDomain}/${cleanSlug}/`;
       const allStreams = [];
       const allIframes = [];
       const customSources = [];
-      const debugInfo = { baseDomain, wpStatus: 0, htmlVia: "none" };
 
-      // 1. Tải trực tiếp trang HTML chi tiết
-      const { html: pageHtml, via, status: htmlStatus } =
-        await fetchHtmlWithFallback(postLink, reqHeaders);
-      debugInfo.htmlVia = via;
-      debugInfo.htmlStatus = htmlStatus;
-      debugInfo.htmlLength = pageHtml.length;
-
+      const pageHtml = await fetchHtmlWithFallback(postLink, reqHeaders);
       if (pageHtml) {
-        foundPost = true;
-        postId = extractWpPostId(pageHtml);
-
         const titleMatch =
           pageHtml.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
           pageHtml.match(/<title>([\s\S]*?)<\/title>/i);
@@ -458,122 +164,25 @@ export async function GET(req) {
         );
         if (ogImg) thumbnail = ogImg[1];
 
-        // Quét media có sẵn trong HTML
-        const media = extractMedia(pageHtml, baseDomain);
-        allStreams.push(...media.streams);
-        allIframes.push(...media.iframes);
-
-        // 2. Bóc tách các nút <button class="video2-btn" data-type="..." data-video="...">
+        // Lấy danh sách các nút Server
         const servers = extractViet69Servers(pageHtml);
-        const scriptInfo = inspectViet69Script(pageHtml);
-        debugInfo.servers = servers;
-        if (scriptInfo.scriptSnippet) {
-          debugInfo.playerSnippet = scriptInfo.scriptSnippet;
-        }
 
-        // Nếu trang có script nhúng riêng (hoặc file JS ngoài xử lý video2-btn), tải thêm file JS đó để tìm công thức URL
-        if (!scriptInfo.scriptSnippet) {
-          const jsFiles =
-            pageHtml.match(
-              /<script[^>]+src=["'](https?:\/\/[^"']+\/wp-content\/themes\/[^"']+\.js[^"']*)["']/gi
-            ) || [];
-          for (const jsTag of jsFiles.slice(0, 3)) {
-            const srcM = jsTag.match(/src=["']([^"']+)["']/i);
-            if (!srcM) continue;
-            try {
-              const jsRes = await fetchWithTimeout(
-                srcM[1],
-                { headers: reqHeaders },
-                4000
-              );
-              if (jsRes.ok) {
-                const jsText = await jsRes.text();
-                if (
-                  jsText.includes("video2-btn") ||
-                  jsText.includes("data-video")
-                ) {
-                  const idx = jsText.indexOf("video2-btn");
-                  debugInfo.playerSnippet = jsText.slice(
-                    Math.max(0, idx - 150),
-                    idx + 750
-                  );
-                  const subInfo = inspectViet69Script(
-                    `<script>${jsText}</script>`
-                  );
-                  scriptInfo.ajaxActions.push(...subInfo.ajaxActions);
-                  scriptInfo.embedDomains.push(...subInfo.embedDomains);
-                  break;
-                }
-              }
-            } catch (_) {}
-          }
-        }
-
-        // 3. Giải mã từng nút Server #1, Server #2...
+        // Gửi yêu cầu AJAX chuẩn của theme Viet69 tới admin-ajax.php để lấy iframe thật
         for (const srv of servers) {
-          const vid = srv.decodedVideo;
-          const rawVid = srv.rawVideo;
-          const vType = srv.dataType;
-
-          // 3a. Nếu decodedVideo bản thân nó đã là URL hoặc thẻ <iframe>
-          if (vid.startsWith("http") || vid.startsWith("//") || vid.includes("<iframe")) {
-            const m = extractMedia(vid, baseDomain);
-            m.streams.forEach((u) => {
-              allStreams.push(u);
-              customSources.push({
-                label: srv.label,
-                name: srv.label,
-                url: u,
-                src: u,
-                type: u.includes(".m3u8") ? "hls" : "mp4"
-              });
-            });
-            m.iframes.forEach((u) => {
-              allIframes.push(u);
-              customSources.push({
-                label: srv.label,
-                name: srv.label,
-                url: u,
-                src: u,
-                type: "iframe"
-              });
-            });
-            if (vid.startsWith("http") && m.streams.length === 0 && m.iframes.length === 0) {
-              allIframes.push(vid);
-              customSources.push({
-                label: srv.label,
-                name: srv.label,
-                url: vid,
-                src: vid,
-                type: "iframe"
-              });
-            }
-            continue;
-          }
-
-          // 3b. Thử gọi admin-ajax.php với các action tìm thấy trong script (hoặc action chuẩn của Viet69)
-          const candidateActions = [
-            ...new Set([
-              ...scriptInfo.ajaxActions,
-              "get_video",
-              "load_video",
-              "get_player",
-              "video2_player",
-              "ajax_video",
-              "get_embed"
-            ])
+          const ajaxActions = [
+            "doo_player_ajax",
+            "halim_ajax_player",
+            "video2_ajax",
+            "get_player"
           ];
 
-          let resolvedByAjax = false;
-          for (const act of candidateActions.slice(0, 5)) {
+          let resolved = false;
+          for (const action of ajaxActions) {
             try {
               const body = new URLSearchParams({
-                action: act,
-                video: rawVid,
-                vid: vid,
-                id: vid,
-                type: vType,
-                post_id: postId || ""
+                action: action,
+                type: srv.dataType,
+                video: srv.dataVideo
               }).toString();
 
               const ajaxRes = await fetchWithTimeout(
@@ -588,34 +197,26 @@ export async function GET(req) {
                   },
                   body
                 },
-                3500
+                4000
               );
 
               if (ajaxRes.ok) {
-                const ajaxText = (await ajaxRes.text()).trim();
-                if (ajaxText && ajaxText !== "0" && ajaxText !== "-1") {
-                  const m = extractMedia(ajaxText, baseDomain);
-                  if (m.streams.length > 0 || m.iframes.length > 0) {
-                    resolvedByAjax = true;
-                    m.streams.forEach((u) => {
-                      allStreams.push(u);
-                      customSources.push({
-                        label: srv.label,
-                        name: srv.label,
-                        url: u,
-                        src: u,
-                        type: u.includes(".m3u8") ? "hls" : "mp4"
-                      });
-                    });
-                    m.iframes.forEach((u) => {
-                      allIframes.push(u);
-                      customSources.push({
-                        label: srv.label,
-                        name: srv.label,
-                        url: u,
-                        src: u,
-                        type: "iframe"
-                      });
+                const text = (await ajaxRes.text()).trim();
+                // Nếu kết quả trả về chứa thẻ iframe hoặc link nhúng
+                if (text && text.length > 5 && text !== "0" && text !== "-1") {
+                  const urlMatch =
+                    text.match(/src=["'](https?:\/\/[^"']+)["']/i) ||
+                    text.match(/(https?:\/\/[^\s"'<>]+)/i);
+                  const iframeUrl = urlMatch ? urlMatch[1] : "";
+                  if (iframeUrl && !iframeUrl.includes("admin-ajax.php")) {
+                    resolved = true;
+                    allIframes.push(iframeUrl);
+                    customSources.push({
+                      label: srv.label,
+                      name: srv.label,
+                      url: iframeUrl,
+                      src: iframeUrl,
+                      type: "iframe"
                     });
                     break;
                   }
@@ -624,54 +225,30 @@ export async function GET(req) {
             } catch (_) {}
           }
 
-          if (resolvedByAjax) continue;
-
-          // 3c. Nếu script có chứa mẫu domain nhúng (ví dụ https://.../embed/), ghép UUID vào
-          for (const dom of scriptInfo.embedDomains) {
-            if (/(?:embed|play|video|v\/|e\/)/i.test(dom)) {
-              const baseEmbed = dom.replace(/\/+$/, "");
-              const builtUrl = `${baseEmbed}/${vid}`;
-              allIframes.push(builtUrl);
-              customSources.push({
-                label: srv.label,
-                name: srv.label,
-                url: builtUrl,
-                src: builtUrl,
-                type: "iframe"
-              });
-            }
+          // Nếu AJAX không bắt được, thử dựng link nhúng mặc định theo cấu trúc phổ biến của Viet69
+          if (!resolved) {
+            const fallbackEmbed = `https://emb.cd-vs.com/embed/${srv.dataVideo}`;
+            allIframes.push(fallbackEmbed);
+            customSources.push({
+              label: srv.label,
+              name: srv.label,
+              url: fallbackEmbed,
+              src: fallbackEmbed,
+              type: "iframe"
+            });
           }
         }
       }
 
       const streams = [...new Set(allStreams)];
       const iframes = [...new Set(allIframes)];
-
-      if (!foundPost && streams.length === 0 && iframes.length === 0) {
-        return NextResponse.json(
-          { error: "not_found", _debug: debugInfo },
-          { status: 404, headers: CORS }
-        );
-      }
-
       const primaryUrl = streams[0] || iframes[0] || "";
-      const primaryType = streams[0]
-        ? streams[0].includes(".m3u8")
-          ? "hls"
-          : "mp4"
-        : "iframe";
+      const primaryType = streams[0] ? "hls" : "iframe";
 
       const finalSources =
         customSources.length > 0
           ? customSources
           : [
-              ...streams.map((u, i) => ({
-                label: `Direct #${i + 1}`,
-                name: `Direct #${i + 1}`,
-                url: u,
-                src: u,
-                type: u.includes(".m3u8") ? "hls" : "mp4"
-              })),
               ...iframes.map((u, i) => ({
                 label: `Server #${i + 1}`,
                 name: `Server #${i + 1}`,
@@ -683,7 +260,7 @@ export async function GET(req) {
 
       return NextResponse.json(
         {
-          id: postId ? String(postId) : cleanSlug,
+          id: cleanSlug,
           slug: cleanSlug,
           title,
           category: "movie",
@@ -691,17 +268,14 @@ export async function GET(req) {
           postLink,
           url: primaryUrl,
           src: primaryUrl,
-          videoUrl: streams[0] || primaryUrl,
-          hlsUrl: streams.find((s) => s.includes(".m3u8")) || "",
-          mp4Url: streams.find((s) => s.includes(".mp4")) || "",
+          videoUrl: primaryUrl,
           embedUrl: iframes[0] || "",
           iframe: iframes[0] || "",
           type: primaryType,
           videoType: primaryType,
           streams,
           iframes,
-          sources: finalSources,
-          _debug: debugInfo
+          sources: finalSources
         },
         { status: 200, headers: CORS }
       );
@@ -713,16 +287,14 @@ export async function GET(req) {
     }
   }
 
-  // =================================================================
-  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO THEO TRANG
-  // =================================================================
+  // DANH SÁCH VIDEO THEO TRANG
   try {
     const pagePath = page > 1 ? `/page/${page}/` : "/";
     const htmlUrl = q
       ? `${baseDomain}${pagePath}?s=${encodeURIComponent(q)}`
       : `${baseDomain}${pagePath}`;
 
-    const { html } = await fetchHtmlWithFallback(htmlUrl, reqHeaders);
+    const html = await fetchHtmlWithFallback(htmlUrl, reqHeaders);
     if (html) {
       const items = [];
       const seen = new Set();
@@ -746,8 +318,6 @@ export async function GET(req) {
         } catch (_) {
           continue;
         }
-
-        if (parsedUrl.hostname.replace(/^www\./, "") !== baseHost) continue;
 
         const pathname = parsedUrl.pathname;
         if (
