@@ -21,6 +21,23 @@ const BROWSER_HEADERS = {
 
 const FALLBACK_THUMB = "https://placehold.co/600x340/18181b/e11d48?text=Video";
 
+const IGNORE_DOMAINS = [
+  "googletagmanager.com",
+  "google.com",
+  "googleapis.com",
+  "gstatic.com",
+  "facebook.com",
+  "twitter.com",
+  "schema.org",
+  "w3.org",
+  "wordpress.org",
+  "wp.com",
+  "gravatar.com",
+  "cloudflare.com",
+  "jsdelivr.net",
+  "cdnjs.cloudflare.com"
+];
+
 export async function OPTIONS() {
   return new NextResponse(null, { status: 200, headers: CORS });
 }
@@ -37,7 +54,7 @@ function cleanText(str = "") {
     .trim();
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 9000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -51,66 +68,210 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   }
 }
 
-// Bóc tách nâng cao: Quét toàn bộ link .m3u8, .mp4, thẻ iframe, video tag và chuỗi Base64
-function extractMedia(html = "") {
-  const unescaped = html.replace(/\\\//g, "/");
-  const streams = new Set();
-  const iframes = new Set();
-
-  // 1. Quét các thuộc tính chứa link video trực tiếp
-  const attrRegex =
-    /(?:data-url|data-src|src)=["'](https?:\/\/[^"']+\.(?:m3u8|mp4|mov|webm)[^"']*)["']/gi;
-  let match;
-  while ((match = attrRegex.exec(unescaped)) !== null) {
-    streams.add(match[1]);
-  }
-
-  // 2. Giải mã chuỗi Base64 bắt đầu bằng aHR0c (http)
-  const b64Regex = /(aHR0c[A-Za-z0-9+/=]{12,})/g;
-  let b64Match;
-  while ((b64Match = b64Regex.exec(unescaped)) !== null) {
+// Giải nén script dạng eval(function(p,a,c,k,e,d){...})
+function unpackPacker(html = "") {
+  let unpacked = "";
+  const packerRegex =
+    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\.split\(['"]\|['"]\)/gi;
+  let m;
+  while ((m = packerRegex.exec(html)) !== null) {
     try {
-      const decoded = Buffer.from(b64Match[1], "base64")
-        .toString("utf-8")
-        .split(/['"\s<>]/)[0];
-      if (decoded.startsWith("http")) {
-        if (decoded.includes(".m3u8") || decoded.includes(".mp4")) {
-          streams.add(decoded);
-        } else if (
-          decoded.includes("embed") ||
-          decoded.includes("player") ||
-          decoded.includes("iframe")
-        ) {
-          iframes.add(decoded);
+      let p = m[2];
+      const a = parseInt(m[3], 10);
+      let c = parseInt(m[4], 10);
+      const k = m[6].split("|");
+      const encodeBase = (num) => {
+        const chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        return (
+          (num < a ? "" : encodeBase(Math.floor(num / a))) +
+          (num % a > 35 ? String.fromCharCode((num % a) + 29) : chars[num % a])
+        );
+      };
+      while (c--) {
+        if (k[c]) {
+          p = p.replace(new RegExp("\\b" + encodeBase(c) + "\\b", "g"), k[c]);
         }
       }
+      unpacked += "\n" + p;
     } catch (_) {}
   }
+  return unpacked;
+}
 
-  // 3. Quét link trực tiếp .m3u8 / .mp4 trong toàn bộ mã nguồn
-  (unescaped.match(/https?:\/\/[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*/gi) || []).forEach((u) =>
-    streams.add(u)
-  );
-  (unescaped.match(/https?:\/\/[^\s"'<>\\]+?\.mp4[^\s"'<>\\]*/gi) || []).forEach((u) =>
-    streams.add(u)
-  );
+// Chuẩn hóa và kiểm tra URL hợp lệ
+function normalizeUrl(raw = "", baseDomain = "") {
+  if (!raw) return "";
+  let u = raw
+    .trim()
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&")
+    .replace(/^['"]+|['"]+$/g, "");
+  if (u.startsWith("//")) u = `https:${u}`;
+  else if (u.startsWith("/") && baseDomain) u = `${baseDomain}${u}`;
+  if (!u.startsWith("http")) return "";
+  if (
+    u.includes("about:blank") ||
+    u.startsWith("javascript:") ||
+    u.startsWith("data:")
+  ) {
+    return "";
+  }
+  const lower = u.toLowerCase();
+  if (IGNORE_DOMAINS.some((d) => lower.includes(d))) return "";
+  return u;
+}
 
-  // 4. Quét tất cả các thẻ iframe hoặc embed player
-  const iframeRegex =
-    /<iframe[^>]+(?:data-litespeed-src|data-lazy-src|data-src|src)=["']([^"']+)["']/gi;
-  while ((match = iframeRegex.exec(unescaped)) !== null) {
-    let src = match[1].trim();
-    if (src.startsWith("//")) src = `https:${src}`;
-    if (
-      src.startsWith("http") &&
-      !src.includes("googletagmanager") &&
-      !src.includes("facebook.com") &&
-      !src.includes("google.com") &&
-      !src.includes("about:blank")
-    ) {
-      iframes.add(src);
+function isStaticAsset(url = "") {
+  const clean = url.split("?")[0].toLowerCase();
+  if (clean.endsWith(".m3u8") || clean.endsWith(".mp4") || clean.endsWith(".webm")) {
+    return false;
+  }
+  return /\.(?:jpg|jpeg|png|webp|gif|svg|ico|css|js|woff2?|ttf|eot|xml|json|php)$/i.test(
+    clean
+  );
+}
+
+// Bóc tách đa tầng: Giải mã Hex, Base64, Packer, Iframe lazy-load, JSON-LD, JWPlayer/Plyr
+function extractMedia(html = "", baseDomain = "") {
+  if (!html) return { streams: [], iframes: [] };
+
+  // 1. Giải mã ký tự escape Hex (\x68\x74...), Unicode và dấu gạch chéo
+  let buffer = html
+    .replace(/\\\//g, "/")
+    .replace(/\\x([0-9A-Fa-f]{2})/g, (_, hex) =>
+      String.fromCharCode(parseInt(hex, 16))
+    )
+    .replace(/\\u0026/gi, "&")
+    .replace(/\\u003c/gi, "<")
+    .replace(/\\u003e/gi, ">")
+    .replace(/\\u0022/gi, '"')
+    .replace(/\\u0027/gi, "'")
+    .replace(/&amp;/g, "&");
+
+  // 2. Giải nén eval(function(p,a,c,k,e,d)...) nếu có
+  buffer += "\n" + unpackPacker(buffer);
+
+  // 3. Giải mã mọi chuỗi Base64 trong atob(...) hoặc chuỗi bắt đầu bằng http / <iframe / //
+  const b64Patterns = [
+    /atob\(\s*["']([A-Za-z0-9+/=]{16,})["']\s*\)/gi,
+    /base64_decode\(\s*["']([A-Za-z0-9+/=]{16,})["']\s*\)/gi,
+    /((?:aHR0c|PGlmcmFt|PHNjcmlwd|PGll|Ly8)[A-Za-z0-9+/=]{12,})/g
+  ];
+  for (const regex of b64Patterns) {
+    let m;
+    while ((m = regex.exec(buffer)) !== null) {
+      try {
+        const decoded = Buffer.from(m[1], "base64").toString("utf-8");
+        if (
+          decoded.includes("http") ||
+          decoded.includes("<iframe") ||
+          decoded.includes(".m3u8") ||
+          decoded.includes(".mp4")
+        ) {
+          buffer += "\n" + decoded;
+        }
+      } catch (_) {}
     }
   }
+
+  const streams = new Set();
+  const iframes = new Set();
+  const baseHost = baseDomain
+    ? new URL(baseDomain).hostname.replace(/^www\./, "")
+    : "";
+
+  const addCandidate = (rawUrl, forceIframe = false) => {
+    const u = normalizeUrl(rawUrl, baseDomain);
+    if (!u || isStaticAsset(u)) return;
+    const lower = u.toLowerCase();
+
+    if (
+      lower.includes(".m3u8") ||
+      lower.includes(".mp4") ||
+      lower.includes(".mov") ||
+      lower.includes(".webm")
+    ) {
+      streams.add(u);
+      return;
+    }
+
+    if (
+      forceIframe ||
+      /(?:\/embed\/|\/e\/|\/v\/|\/play\/|\/player\/|\/stream\/|player\.|embed\.|stream|vid|hydrax|abyss|dood|ok\.ru|helvid|vhstream|goostream|iframe)/i.test(
+        lower
+      )
+    ) {
+      // Không lấy nhầm link bài viết thông thường của chính trang nguồn làm iframe
+      try {
+        const uObj = new URL(u);
+        const uHost = uObj.hostname.replace(/^www\./, "");
+        if (
+          uHost === baseHost &&
+          !/(?:embed|player|play|stream|video|wp-content|ajax|\?)/i.test(uObj.pathname + uObj.search)
+        ) {
+          return;
+        }
+      } catch (_) {}
+      iframes.add(u);
+    }
+  };
+
+  // 4. Quét từng thẻ <iframe ...> độc lập (tránh lỗi greedy ăn nhầm src="about:blank")
+  const iframeTags = buffer.match(/<iframe\b[^>]*>/gi) || [];
+  const iframeAttrs = [
+    "data-litespeed-src",
+    "data-lazy-src",
+    "data-wpfc-original-src",
+    "data-src",
+    "data-original",
+    "src"
+  ];
+  for (const tag of iframeTags) {
+    for (const attr of iframeAttrs) {
+      const attrMatch = tag.match(
+        new RegExp(`\\b${attr}\\s*=\\s*["']([^"']+)["']`, "i")
+      );
+      if (attrMatch && attrMatch[1]) {
+        const candidate = normalizeUrl(attrMatch[1], baseDomain);
+        if (candidate) {
+          addCandidate(candidate, true);
+        }
+      }
+    }
+  }
+
+  // 5. Quét thẻ <video>, <source> và các thuộc tính data-* chứa player trên <div>, <li>, <button>
+  const dataAttrRegex =
+    /(?:data-video|data-embed|data-iframe|data-player|data-stream|data-file|data-url|data-link|data-src|data-lazy-src|data-litespeed-src)\s*=\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
+  let match;
+  while ((match = dataAttrRegex.exec(buffer)) !== null) {
+    addCandidate(match[1], false);
+  }
+
+  // 6. Quét thẻ <meta> (og:video, twitter:player, embedUrl) và JSON-LD
+  const metaRegex =
+    /<meta[^>]+(?:property|name|itemprop)\s*=\s*["'](?:og:video(?::url|:secure_url)?|twitter:player|embedUrl|contentUrl)["'][^>]+content\s*=\s*["']([^"']+)["']/gi;
+  while ((match = metaRegex.exec(buffer)) !== null) {
+    addCandidate(match[1], true);
+  }
+
+  // 7. Quét biến cấu hình JS (jwplayer, Plyr, Artplayer, sources, embedUrl...)
+  const jsConfigRegex =
+    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|contentUrl|video_url|videoUrl|stream_url|iframe_url|hls|mp4)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
+  while ((match = jsConfigRegex.exec(buffer)) !== null) {
+    addCandidate(match[1], false);
+  }
+
+  const jsVarRegex =
+    /(?:var|let|const)\s+(?:embed|player|video|stream|link|url|src)[A-Za-z0-9_]*\s*=\s*["'](https?:\/\/[^"'\s<>]+)["']/gi;
+  while ((match = jsVarRegex.exec(buffer)) !== null) {
+    addCandidate(match[1], true);
+  }
+
+  // 8. Quét trực tiếp toàn bộ link .m3u8 và .mp4 trong mã nguồn
+  (
+    buffer.match(/https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\]*)?/gi) || []
+  ).forEach((u) => addCandidate(u, false));
 
   return {
     streams: [...streams],
@@ -118,11 +279,29 @@ function extractMedia(html = "") {
   };
 }
 
+// Tìm Post ID của WordPress từ mã HTML để gọi bù REST API / AJAX khi cần
+function extractWpPostId(html = "") {
+  const patterns = [
+    /\bpostid-(\d+)\b/i,
+    /\bdata-post(?:-id)?=["'](\d+)["']/i,
+    /\bdata-id=["'](\d+)["']/i,
+    /["']post_id["']\s*:\s*["']?(\d+)/i,
+    /\?p=(\d+)["']/i,
+    /wp\/v2\/posts\/(\d+)/i
+  ];
+  for (const p of patterns) {
+    const m = html.match(p);
+    if (m && m[1]) return m[1];
+  }
+  return null;
+}
+
 export async function GET(req) {
   const sp = req.nextUrl.searchParams;
   const slug = sp.get("slug");
   const category = sp.get("category") || "all";
   const q = (sp.get("q") || "").trim();
+  const debug = sp.get("debug") === "1";
   const page = Math.max(1, parseInt(sp.get("page") || "1", 10) || 1);
   const per = siteConfig?.perPage || 12;
 
@@ -165,11 +344,13 @@ export async function GET(req) {
     try {
       let title = cleanSlug;
       let thumbnail = "";
+      let postId = null;
       let foundPost = false;
       const allStreams = [];
       const allIframes = [];
+      const debugInfo = {};
 
-      // 1. Lấy qua WordPress REST API
+      // BƯỚC 1: Lấy qua WordPress REST API theo slug
       try {
         const wpRes = await fetchWithTimeout(
           `${baseDomain}/wp-json/wp/v2/posts?slug=${encodeURIComponent(cleanSlug)}&_embed`,
@@ -180,43 +361,125 @@ export async function GET(req) {
           if (Array.isArray(posts) && posts.length > 0) {
             foundPost = true;
             const p = posts[0];
+            postId = p.id;
             title = cleanText(p.title?.rendered || cleanSlug);
             thumbnail =
               p._embedded?.["wp:featuredmedia"]?.[0]?.source_url ||
               p.yoast_head_json?.og_image?.[0]?.url ||
               "";
-            const media = extractMedia(p.content?.rendered || "");
+            // Quét toàn bộ JSON của bài viết (bao gồm cả content.rendered, meta, yoast...)
+            const media = extractMedia(JSON.stringify(p), baseDomain);
             allStreams.push(...media.streams);
             allIframes.push(...media.iframes);
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        debugInfo.wpSlugError = e.message;
+      }
 
-      // 2. Quét trực tiếp trang HTML chi tiết để bắt toàn bộ player nhúng bên ngoài
+      // BƯỚC 2: Quét trực tiếp trang HTML chi tiết
+      let pageHtml = "";
       try {
         const htmlRes = await fetchWithTimeout(`${baseDomain}/${cleanSlug}/`, {
           headers: reqHeaders
         });
         if (htmlRes.ok) {
           foundPost = true;
-          const html = await htmlRes.text();
+          pageHtml = await htmlRes.text();
+          if (!postId) postId = extractWpPostId(pageHtml);
+
           const titleMatch =
-            html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
-            html.match(/<title>([\s\S]*?)<\/title>/i);
+            pageHtml.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
+            pageHtml.match(/<title>([\s\S]*?)<\/title>/i);
           if (titleMatch && title === cleanSlug) {
-            title = cleanText(titleMatch[1]);
+            title = cleanText(titleMatch[1]).replace(/\s*[-|–]\s*Viet69.*$/i, "");
           }
           if (!thumbnail) {
-            const ogImg = html.match(
+            const ogImg = pageHtml.match(
               /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i
             );
             if (ogImg) thumbnail = ogImg[1];
           }
-          const media = extractMedia(html);
+          const media = extractMedia(pageHtml, baseDomain);
           allStreams.push(...media.streams);
           allIframes.push(...media.iframes);
         }
-      } catch (_) {}
+      } catch (e) {
+        debugInfo.htmlError = e.message;
+      }
+
+      // BƯỚC 3: Nếu có postId mà chưa có stream, gọi trực tiếp WP API theo ID và AJAX Player
+      if (postId && allStreams.length === 0 && allIframes.length === 0) {
+        try {
+          const wpById = await fetchWithTimeout(
+            `${baseDomain}/wp-json/wp/v2/posts/${postId}?_embed`,
+            { headers: reqHeaders }
+          );
+          if (wpById.ok) {
+            const pJson = await wpById.text();
+            const media = extractMedia(pJson, baseDomain);
+            allStreams.push(...media.streams);
+            allIframes.push(...media.iframes);
+          }
+        } catch (_) {}
+
+        const ajaxActions = [
+          `action=doo_player_ajax&post=${postId}&nume=1&type=movie`,
+          `action=halim_ajax_player&post_id=${postId}&episode=1&server=1`,
+          `action=get_player&id=${postId}`
+        ];
+        for (const body of ajaxActions) {
+          if (allStreams.length > 0 || allIframes.length > 0) break;
+          try {
+            const ajaxRes = await fetchWithTimeout(
+              `${baseDomain}/wp-admin/admin-ajax.php`,
+              {
+                method: "POST",
+                headers: {
+                  ...reqHeaders,
+                  "Content-Type":
+                    "application/x-www-form-urlencoded; charset=UTF-8",
+                  "X-Requested-With": "XMLHttpRequest"
+                },
+                body
+              },
+              5000
+            );
+            if (ajaxRes.ok) {
+              const ajaxText = await ajaxRes.text();
+              const media = extractMedia(ajaxText, baseDomain);
+              allStreams.push(...media.streams);
+              allIframes.push(...media.iframes);
+            }
+          } catch (_) {}
+        }
+      }
+
+      // BƯỚC 4: Quét xuyên tầng (2nd-hop) vào bên trong Iframe đầu tiên để lấy link .m3u8/.mp4
+      if (allStreams.length === 0 && allIframes.length > 0) {
+        try {
+          const firstIframe = allIframes[0];
+          const embedRes = await fetchWithTimeout(
+            firstIframe,
+            {
+              headers: {
+                ...BROWSER_HEADERS,
+                Referer: `${baseDomain}/${cleanSlug}/`
+              }
+            },
+            6000
+          );
+          if (embedRes.ok) {
+            const embedHtml = await embedRes.text();
+            const embedOrigin = new URL(firstIframe).origin;
+            const nestedMedia = extractMedia(embedHtml, embedOrigin);
+            allStreams.push(...nestedMedia.streams);
+            allIframes.push(...nestedMedia.iframes);
+          }
+        } catch (e) {
+          debugInfo.iframeHopError = e.message;
+        }
+      }
 
       const streams = [...new Set(allStreams)];
       const iframes = [...new Set(allIframes)];
@@ -237,7 +500,7 @@ export async function GET(req) {
 
       return NextResponse.json(
         {
-          id: cleanSlug,
+          id: postId ? String(postId) : cleanSlug,
           slug: cleanSlug,
           title,
           category: "movie",
@@ -268,7 +531,16 @@ export async function GET(req) {
               src: u,
               type: "iframe"
             }))
-          ]
+          ],
+          ...(debug
+            ? {
+                _debug: {
+                  postId,
+                  htmlLength: pageHtml.length,
+                  ...debugInfo
+                }
+              }
+            : {})
         },
         { status: 200, headers: CORS }
       );
@@ -330,7 +602,6 @@ export async function GET(req) {
       }
     }
 
-    // Fallback: Quét HTML danh sách (hỗ trợ cả phân trang khi tìm kiếm)
     const pagePath = page > 1 ? `/page/${page}/` : "/";
     const htmlUrl = q
       ? `${baseDomain}${pagePath}?s=${encodeURIComponent(q)}`
@@ -342,15 +613,18 @@ export async function GET(req) {
       const items = [];
       const seen = new Set();
 
-      // Tách theo thẻ <article> trước; nếu theme không dùng <article> thì tách theo vị trí các khối post/item
       const articleBlocks = html.match(/<article[\s\S]*?<\/article>/gi) || [];
       const blocks =
         articleBlocks.length > 0
           ? articleBlocks
-          : html.split(/(?=<div[^>]+class=["'][^"']*(?:post-|video-item|clip-item|entry-item|item-video)[^"']*["'])/i);
+          : html.split(
+              /(?=<div[^>]+class=["'][^"']*(?:post-|video-item|clip-item|entry-item|item-video)[^"']*["'])/i
+            );
 
       for (const block of blocks) {
-        const linkMatch = block.match(/<a[^>]+href=["'](https?:\/\/[^"']+|\/[^"']+)["']/i);
+        const linkMatch = block.match(
+          /<a[^>]+href=["'](https?:\/\/[^"']+|\/[^"']+)["']/i
+        );
         if (!linkMatch) continue;
 
         let parsedUrl;
@@ -360,7 +634,6 @@ export async function GET(req) {
           continue;
         }
 
-        // Bỏ qua link trỏ ra tên miền khác
         if (parsedUrl.hostname.replace(/^www\./, "") !== baseHost) continue;
 
         const pathname = parsedUrl.pathname;
@@ -409,7 +682,6 @@ export async function GET(req) {
     }
   } catch (_) {}
 
-  // Fallback cuối cùng: Đọc từ file JSON nội bộ
   const filtered = data.filter(
     (v) =>
       (category === "all" || v.category === category) &&
