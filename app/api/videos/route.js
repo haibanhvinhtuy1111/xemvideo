@@ -85,8 +85,7 @@ async function fetchHtmlWithFallback(targetUrl, headers) {
 
   const proxies = [
     (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-    (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`
+    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
   ];
 
   for (const buildProxy of proxies) {
@@ -141,9 +140,97 @@ function isStaticAsset(url = "") {
   );
 }
 
-// Bóc tách chuyên sâu cho Viet69 (RetroTube) & WordPress Video Themes
+function decodeBase64Safe(str = "") {
+  try {
+    const decoded = Buffer.from(str.trim(), "base64").toString("utf-8").trim();
+    if (decoded && !/[\x00-\x08\x0E-\x1F]/.test(decoded)) {
+      return decoded;
+    }
+  } catch (_) {}
+  return "";
+}
+
+// 1. Tách danh sách các nút Server (.video2-btn) của Viet69
+function extractViet69Servers(html = "") {
+  const servers = [];
+  const btnRegex =
+    /<button[^>]*class=["'][^"']*video2-btn[^"']*["'][^>]*>([\s\S]*?)<\/button>/gi;
+  let m;
+  while ((m = btnRegex.exec(html)) !== null) {
+    const tag = m[0];
+    const label = cleanText(m[1]) || `Server #${servers.length + 1}`;
+    const typeMatch = tag.match(/\bdata-type=["']([^"']+)["']/i);
+    const videoMatch = tag.match(/\bdata-video=["']([^"']+)["']/i);
+    if (videoMatch && videoMatch[1]) {
+      const rawVideo = videoMatch[1].trim();
+      const decodedVideo = decodeBase64Safe(rawVideo) || rawVideo;
+      servers.push({
+        label,
+        dataType: typeMatch ? typeMatch[1].trim() : "",
+        rawVideo,
+        decodedVideo
+      });
+    }
+  }
+  return servers;
+}
+
+// 2. Tìm đoạn script xử lý .video2-btn trong trang để lấy tên action AJAX và mẫu URL nhúng
+function inspectViet69Script(html = "") {
+  const info = {
+    ajaxActions: new Set(),
+    embedDomains: new Set(),
+    scriptSnippet: ""
+  };
+
+  // Bắt đoạn script có chứa video2-btn hoặc data-video
+  const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = scriptRegex.exec(html)) !== null) {
+    const content = m[1];
+    if (
+      content.includes("video2-btn") ||
+      content.includes("data-video") ||
+      content.includes("data-type")
+    ) {
+      info.scriptSnippet = content.trim().slice(0, 900);
+
+      // Tìm mọi action AJAX trong script này
+      const actRegex = /action\s*[:=]\s*["']([a-zA-Z0-9_-]+)["']/gi;
+      let am;
+      while ((am = actRegex.exec(content)) !== null) {
+        info.ajaxActions.add(am[1]);
+      }
+
+      // Tìm mọi tên miền/đường dẫn nhúng trong script này
+      const urlRegex = /https?:\/\/[^\s"'<>\\`]+/gi;
+      let um;
+      while ((um = urlRegex.exec(content)) !== null) {
+        const u = um[0].replace(/\\\//g, "/");
+        if (!IGNORE_DOMAINS.some((d) => u.includes(d))) {
+          info.embedDomains.add(u);
+        }
+      }
+    }
+  }
+
+  // Quét thêm toàn trang tìm action AJAX trong jQuery.post / $.ajax
+  const globalActRegex =
+    /action\s*:\s*["']([a-zA-Z0-9_-]*(?:video|player|embed|stream|get|load)[a-zA-Z0-9_-]*)["']/gi;
+  while ((m = globalActRegex.exec(html)) !== null) {
+    info.ajaxActions.add(m[1]);
+  }
+
+  return {
+    ajaxActions: [...info.ajaxActions],
+    embedDomains: [...info.embedDomains],
+    scriptSnippet: info.scriptSnippet
+  };
+}
+
+// 3. Bóc tách URL luồng phát (.m3u8, .mp4, iframe) từ bất kỳ chuỗi HTML/JSON nào
 function extractMedia(html = "", baseDomain = "") {
-  if (!html) return { streams: [], iframes: [], playerSnippet: "" };
+  if (!html) return { streams: [], iframes: [] };
 
   let buffer = html
     .replace(/\\\//g, "/")
@@ -157,20 +244,14 @@ function extractMedia(html = "", baseDomain = "") {
     .replace(/\\u0027/gi, "'")
     .replace(/&amp;/g, "&");
 
-  // Giải mã mọi chuỗi Base64 trong mã nguồn (bao gồm cả data-src/data-link của Server #1, Server #2)
-  const b64Regex = /([A-Za-z0-9+/]{28,}={0,2})/g;
+  // Giải mã mọi chuỗi Base64 trong văn bản
+  const b64Regex = /([A-Za-z0-9+/]{24,}={0,2})/g;
   let b64Match;
   while ((b64Match = b64Regex.exec(buffer)) !== null) {
-    const candidate = b64Match[1];
-    try {
-      const decoded = Buffer.from(candidate, "base64").toString("utf-8");
-      if (
-        /https?:\/\/|<iframe|\.m3u8|\.mp4/i.test(decoded) &&
-        !/[\x00-\x08\x0E-\x1F]/.test(decoded)
-      ) {
-        buffer += "\n" + decoded;
-      }
-    } catch (_) {}
+    const decoded = decodeBase64Safe(b64Match[1]);
+    if (decoded && /https?:\/\/|<iframe|\.m3u8|\.mp4/i.test(decoded)) {
+      buffer += "\n" + decoded;
+    }
   }
 
   const streams = new Set();
@@ -179,7 +260,7 @@ function extractMedia(html = "", baseDomain = "") {
     ? new URL(baseDomain).hostname.replace(/^www\./, "")
     : "";
 
-  const isInternalPageLink = (u) => {
+  const isInternalArticle = (u) => {
     try {
       const uObj = new URL(u);
       const uHost = uObj.hostname.replace(/^www\./, "");
@@ -221,38 +302,22 @@ function extractMedia(html = "", baseDomain = "") {
       return;
     }
 
-    if (trustAsIframe && !isInternalPageLink(u)) {
+    if (trustAsIframe && !isInternalArticle(u)) {
       iframes.add(u);
       return;
     }
 
     if (
-      /(?:embed|\/e\/|\/v\/|\/play|player|stream|video|hydrax|abyss|dood|ok\.ru|helvid|vhstream|goostream|blogger\.com|blogspot|clip|watch|token=|id=)/i.test(
+      /(?:embed|\/e\/|\/v\/|\/play|player|stream|video|hydrax|abyss|dood|ok\.ru|helvid|vhstream|goostream|cd-vs|blogger\.com|blogspot|clip|watch|token=|id=)/i.test(
         lower
       ) &&
-      !isInternalPageLink(u)
+      !isInternalArticle(u)
     ) {
       iframes.add(u);
     }
   };
 
-  // 1. Khoanh vùng khu vực Player và cụm nút Server #1 / Server #2 của Viet69
-  let playerSnippet = "";
-  const playerZoneRegex =
-    /(?:class=["'][^"']*(?:responsive-player|video-player|player-embed|video-embed|entry-player|server-list|list-server)[^"']*["']|Server\s*#?1)[\s\S]{0,6000}/i;
-  const zoneMatch = buffer.match(playerZoneRegex);
-  if (zoneMatch) {
-    const zoneHtml = zoneMatch[0];
-    playerSnippet = zoneHtml.slice(0, 600);
-    // Mọi URL nằm trong vùng player/Server #1 đều được ưu tiên nhận làm luồng phát
-    const zoneUrls =
-      zoneHtml.match(/https?:\/\/[^\s"'<>\\]+|\/\/[^\s"'<>\\]+/gi) || [];
-    for (const u of zoneUrls) {
-      addCandidate(u, true);
-    }
-  }
-
-  // 2. Quét tất cả thẻ <iframe>, <embed>, <object>, <source>
+  // Quét các thẻ <iframe ...>, <embed ...>, <source ...>
   const embedTags =
     buffer.match(/<(?:iframe|embed|object|video|source)\b[^>]*>/gi) || [];
   const attrs = [
@@ -263,7 +328,6 @@ function extractMedia(html = "", baseDomain = "") {
     "data-original",
     "data-url",
     "data-link",
-    "data-embed",
     "src",
     "data"
   ];
@@ -277,36 +341,15 @@ function extractMedia(html = "", baseDomain = "") {
     }
   }
 
-  // 3. Quét tất cả thuộc tính data-* trên các nút chuyển Server (Server #1, Server #2...)
-  const dataAttrRegex =
-    /\bdata-(?:video|embed|iframe|player|stream|file|url|link|src|lazy-src|litespeed-src|server|hash)\s*=\s*["']([^"']+)["']/gi;
-  let match;
-  while ((match = dataAttrRegex.exec(buffer)) !== null) {
-    addCandidate(match[1], true);
-  }
-
-  // 4. Quét sự kiện onclick trên nút Server (ví dụ: onclick="changeServer('https://...')")
-  const onclickRegex =
-    /onclick\s*=\s*["'][^"']*?(https?:\/\/[^"'\s()]+|\/\/[^"'\s()]+)[^"']*["']/gi;
-  while ((match = onclickRegex.exec(buffer)) !== null) {
-    addCandidate(match[1], true);
-  }
-
-  // 5. Quét thẻ <meta> (og:video, twitter:player, embedUrl, contentUrl)
-  const metaRegex =
-    /<meta[^>]+(?:property|name|itemprop)\s*=\s*["'](?:og:video(?::url|:secure_url)?|twitter:player|embedUrl|contentUrl)["'][^>]+content\s*=\s*["']([^"']+)["']/gi;
-  while ((match = metaRegex.exec(buffer)) !== null) {
-    addCandidate(match[1], true);
-  }
-
-  // 6. Quét biến JS cấu hình player
+  // Quét biến JS cấu hình player
   const jsConfigRegex =
     /(?:["']?(?:file|source|src|url|embed_url|embedUrl|contentUrl|video_url|videoUrl|stream_url|iframe_url|hls|mp4|link)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
+  let match;
   while ((match = jsConfigRegex.exec(buffer)) !== null) {
-    addCandidate(match[1], false);
+    addCandidate(match[1], true);
   }
 
-  // 7. Quét trực tiếp mọi link .m3u8 và .mp4
+  // Quét trực tiếp link .m3u8 và .mp4
   (
     buffer.match(
       /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\]*)?/gi
@@ -315,13 +358,13 @@ function extractMedia(html = "", baseDomain = "") {
 
   return {
     streams: [...streams],
-    iframes: [...iframes],
-    playerSnippet
+    iframes: [...iframes]
   };
 }
 
 function extractWpPostId(html = "") {
   const patterns = [
+    /\bdata-pid=["'](\d+)["']/i,
     /\bpostid-(\d+)\b/i,
     /\bpost-(\d+)\b/i,
     /\bdata-post(?:-id)?=["']?(\d+)/i,
@@ -334,22 +377,6 @@ function extractWpPostId(html = "") {
     if (m && m[1]) return m[1];
   }
   return null;
-}
-
-// Tự động tìm các action AJAX trong mã nguồn trang (phục vụ nút Server #1 / Server #2)
-function extractAjaxActions(html = "") {
-  const actions = new Set([
-    "doo_player_ajax",
-    "halim_ajax_player",
-    "get_player",
-    "load_player"
-  ]);
-  const regex = /action\s*[:=]\s*["']([a-zA-Z0-9_-]*(?:player|embed|video|server|stream)[a-zA-Z0-9_-]*)["']/gi;
-  let m;
-  while ((m = regex.exec(html)) !== null) {
-    actions.add(m[1]);
-  }
-  return [...actions];
 }
 
 export async function GET(req) {
@@ -386,6 +413,9 @@ export async function GET(req) {
   const baseHost = new URL(baseDomain).hostname.replace(/^www\./, "");
   const reqHeaders = { ...BROWSER_HEADERS, Referer: `${baseDomain}/` };
 
+  // =================================================================
+  // TRƯỜNG HỢP 1: LẤY CHI TIẾT VIDEO THEO SLUG (?slug=...)
+  // =================================================================
   if (slug) {
     const cleanSlug = slug.replace(/^\/+|\/+$/g, "");
     const localVideo = data.find(
@@ -403,37 +433,10 @@ export async function GET(req) {
       let foundPost = false;
       const allStreams = [];
       const allIframes = [];
+      const customSources = [];
       const debugInfo = { baseDomain, wpStatus: 0, htmlVia: "none" };
 
-      // 1. Lấy thông tin bài viết từ WordPress REST API
-      try {
-        const wpRes = await fetchWithTimeout(
-          `${baseDomain}/wp-json/wp/v2/posts?slug=${encodeURIComponent(cleanSlug)}&_embed`,
-          { headers: reqHeaders }
-        );
-        debugInfo.wpStatus = wpRes.status;
-        if (wpRes.ok) {
-          const posts = await wpRes.json();
-          if (Array.isArray(posts) && posts.length > 0) {
-            foundPost = true;
-            const p = posts[0];
-            postId = p.id;
-            if (p.link) postLink = p.link;
-            title = cleanText(p.title?.rendered || cleanSlug);
-            thumbnail =
-              p._embedded?.["wp:featuredmedia"]?.[0]?.source_url ||
-              p.yoast_head_json?.og_image?.[0]?.url ||
-              "";
-            const media = extractMedia(JSON.stringify(p), baseDomain);
-            allStreams.push(...media.streams);
-            allIframes.push(...media.iframes);
-          }
-        }
-      } catch (e) {
-        debugInfo.wpError = e.message;
-      }
-
-      // 2. Tải trang HTML chi tiết để lấy vùng .responsive-player và Server #1 / Server #2
+      // 1. Tải trực tiếp trang HTML chi tiết
       const { html: pageHtml, via, status: htmlStatus } =
         await fetchHtmlWithFallback(postLink, reqHeaders);
       debugInfo.htmlVia = via;
@@ -442,76 +445,203 @@ export async function GET(req) {
 
       if (pageHtml) {
         foundPost = true;
-        if (!postId) postId = extractWpPostId(pageHtml);
+        postId = extractWpPostId(pageHtml);
 
         const titleMatch =
           pageHtml.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
           pageHtml.match(/<title>([\s\S]*?)<\/title>/i);
-        if (titleMatch && title === cleanSlug) {
+        if (titleMatch) {
           title = cleanText(titleMatch[1]).replace(/\s*[-|–]\s*Viet69.*$/i, "");
         }
-        if (!thumbnail) {
-          const ogImg = pageHtml.match(
-            /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i
-          );
-          if (ogImg) thumbnail = ogImg[1];
-        }
+        const ogImg = pageHtml.match(
+          /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i
+        );
+        if (ogImg) thumbnail = ogImg[1];
+
+        // Quét media có sẵn trong HTML
         const media = extractMedia(pageHtml, baseDomain);
         allStreams.push(...media.streams);
         allIframes.push(...media.iframes);
-        if (media.playerSnippet) {
-          debugInfo.playerSnippet = media.playerSnippet;
-        }
-      }
 
-      // 3. Nếu chưa có luồng, tự động gọi các action AJAX tìm thấy trong trang
-      if (postId && allStreams.length === 0 && allIframes.length === 0) {
-        const actions = extractAjaxActions(pageHtml);
-        for (const act of actions) {
-          if (allStreams.length > 0 || allIframes.length > 0) break;
-          const body = `action=${act}&post=${postId}&post_id=${postId}&id=${postId}&nume=1&server=1&type=movie`;
-          try {
-            const ajaxRes = await fetchWithTimeout(
-              `${baseDomain}/wp-admin/admin-ajax.php`,
-              {
-                method: "POST",
-                headers: {
-                  ...reqHeaders,
-                  "Content-Type":
-                    "application/x-www-form-urlencoded; charset=UTF-8",
-                  "X-Requested-With": "XMLHttpRequest"
-                },
-                body
-              },
-              4500
-            );
-            if (ajaxRes.ok) {
-              const ajaxText = await ajaxRes.text();
-              const media = extractMedia(ajaxText, baseDomain);
-              allStreams.push(...media.streams);
-              allIframes.push(...media.iframes);
-            }
-          } catch (_) {}
+        // 2. Bóc tách các nút <button class="video2-btn" data-type="..." data-video="...">
+        const servers = extractViet69Servers(pageHtml);
+        const scriptInfo = inspectViet69Script(pageHtml);
+        debugInfo.servers = servers;
+        if (scriptInfo.scriptSnippet) {
+          debugInfo.playerSnippet = scriptInfo.scriptSnippet;
         }
-      }
 
-      // 4. Quét xuyên vào Iframe đầu tiên nếu muốn lấy thêm link .m3u8/.mp4 trực tiếp
-      if (allStreams.length === 0 && allIframes.length > 0) {
-        try {
-          const firstIframe = allIframes[0];
-          const embedRes = await fetchWithTimeout(
-            firstIframe,
-            { headers: { ...BROWSER_HEADERS, Referer: postLink } },
-            5000
-          );
-          if (embedRes.ok) {
-            const embedHtml = await embedRes.text();
-            const embedOrigin = new URL(firstIframe).origin;
-            const nestedMedia = extractMedia(embedHtml, embedOrigin);
-            allStreams.push(...nestedMedia.streams);
-            allIframes.push(...nestedMedia.iframes);
+        // Nếu trang có script nhúng riêng (hoặc file JS ngoài xử lý video2-btn), tải thêm file JS đó để tìm công thức URL
+        if (!scriptInfo.scriptSnippet) {
+          const jsFiles =
+            pageHtml.match(
+              /<script[^>]+src=["'](https?:\/\/[^"']+\/wp-content\/themes\/[^"']+\.js[^"']*)["']/gi
+            ) || [];
+          for (const jsTag of jsFiles.slice(0, 3)) {
+            const srcM = jsTag.match(/src=["']([^"']+)["']/i);
+            if (!srcM) continue;
+            try {
+              const jsRes = await fetchWithTimeout(
+                srcM[1],
+                { headers: reqHeaders },
+                4000
+              );
+              if (jsRes.ok) {
+                const jsText = await jsRes.text();
+                if (
+                  jsText.includes("video2-btn") ||
+                  jsText.includes("data-video")
+                ) {
+                  const idx = jsText.indexOf("video2-btn");
+                  debugInfo.playerSnippet = jsText.slice(
+                    Math.max(0, idx - 150),
+                    idx + 750
+                  );
+                  const subInfo = inspectViet69Script(
+                    `<script>${jsText}</script>`
+                  );
+                  scriptInfo.ajaxActions.push(...subInfo.ajaxActions);
+                  scriptInfo.embedDomains.push(...subInfo.embedDomains);
+                  break;
+                }
+              }
+            } catch (_) {}
           }
-        } catch (_) {}
+        }
+
+        // 3. Giải mã từng nút Server #1, Server #2...
+        for (const srv of servers) {
+          const vid = srv.decodedVideo;
+          const rawVid = srv.rawVideo;
+          const vType = srv.dataType;
+
+          // 3a. Nếu decodedVideo bản thân nó đã là URL hoặc thẻ <iframe>
+          if (vid.startsWith("http") || vid.startsWith("//") || vid.includes("<iframe")) {
+            const m = extractMedia(vid, baseDomain);
+            m.streams.forEach((u) => {
+              allStreams.push(u);
+              customSources.push({
+                label: srv.label,
+                name: srv.label,
+                url: u,
+                src: u,
+                type: u.includes(".m3u8") ? "hls" : "mp4"
+              });
+            });
+            m.iframes.forEach((u) => {
+              allIframes.push(u);
+              customSources.push({
+                label: srv.label,
+                name: srv.label,
+                url: u,
+                src: u,
+                type: "iframe"
+              });
+            });
+            if (vid.startsWith("http") && m.streams.length === 0 && m.iframes.length === 0) {
+              allIframes.push(vid);
+              customSources.push({
+                label: srv.label,
+                name: srv.label,
+                url: vid,
+                src: vid,
+                type: "iframe"
+              });
+            }
+            continue;
+          }
+
+          // 3b. Thử gọi admin-ajax.php với các action tìm thấy trong script (hoặc action chuẩn của Viet69)
+          const candidateActions = [
+            ...new Set([
+              ...scriptInfo.ajaxActions,
+              "get_video",
+              "load_video",
+              "get_player",
+              "video2_player",
+              "ajax_video",
+              "get_embed"
+            ])
+          ];
+
+          let resolvedByAjax = false;
+          for (const act of candidateActions.slice(0, 5)) {
+            try {
+              const body = new URLSearchParams({
+                action: act,
+                video: rawVid,
+                vid: vid,
+                id: vid,
+                type: vType,
+                post_id: postId || ""
+              }).toString();
+
+              const ajaxRes = await fetchWithTimeout(
+                `${baseDomain}/wp-admin/admin-ajax.php`,
+                {
+                  method: "POST",
+                  headers: {
+                    ...reqHeaders,
+                    "Content-Type":
+                      "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest"
+                  },
+                  body
+                },
+                3500
+              );
+
+              if (ajaxRes.ok) {
+                const ajaxText = (await ajaxRes.text()).trim();
+                if (ajaxText && ajaxText !== "0" && ajaxText !== "-1") {
+                  const m = extractMedia(ajaxText, baseDomain);
+                  if (m.streams.length > 0 || m.iframes.length > 0) {
+                    resolvedByAjax = true;
+                    m.streams.forEach((u) => {
+                      allStreams.push(u);
+                      customSources.push({
+                        label: srv.label,
+                        name: srv.label,
+                        url: u,
+                        src: u,
+                        type: u.includes(".m3u8") ? "hls" : "mp4"
+                      });
+                    });
+                    m.iframes.forEach((u) => {
+                      allIframes.push(u);
+                      customSources.push({
+                        label: srv.label,
+                        name: srv.label,
+                        url: u,
+                        src: u,
+                        type: "iframe"
+                      });
+                    });
+                    break;
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+
+          if (resolvedByAjax) continue;
+
+          // 3c. Nếu script có chứa mẫu domain nhúng (ví dụ https://.../embed/), ghép UUID vào
+          for (const dom of scriptInfo.embedDomains) {
+            if (/(?:embed|play|video|v\/|e\/)/i.test(dom)) {
+              const baseEmbed = dom.replace(/\/+$/, "");
+              const builtUrl = `${baseEmbed}/${vid}`;
+              allIframes.push(builtUrl);
+              customSources.push({
+                label: srv.label,
+                name: srv.label,
+                url: builtUrl,
+                src: builtUrl,
+                type: "iframe"
+              });
+            }
+          }
+        }
       }
 
       const streams = [...new Set(allStreams)];
@@ -530,6 +660,26 @@ export async function GET(req) {
           ? "hls"
           : "mp4"
         : "iframe";
+
+      const finalSources =
+        customSources.length > 0
+          ? customSources
+          : [
+              ...streams.map((u, i) => ({
+                label: `Direct #${i + 1}`,
+                name: `Direct #${i + 1}`,
+                url: u,
+                src: u,
+                type: u.includes(".m3u8") ? "hls" : "mp4"
+              })),
+              ...iframes.map((u, i) => ({
+                label: `Server #${i + 1}`,
+                name: `Server #${i + 1}`,
+                url: u,
+                src: u,
+                type: "iframe"
+              }))
+            ];
 
       return NextResponse.json(
         {
@@ -550,22 +700,7 @@ export async function GET(req) {
           videoType: primaryType,
           streams,
           iframes,
-          sources: [
-            ...streams.map((u, i) => ({
-              label: `Direct #${i + 1}`,
-              name: `Direct #${i + 1}`,
-              url: u,
-              src: u,
-              type: u.includes(".m3u8") ? "hls" : "mp4"
-            })),
-            ...iframes.map((u, i) => ({
-              label: `Server #${i + 1}`,
-              name: `Server #${i + 1}`,
-              url: u,
-              src: u,
-              type: "iframe"
-            }))
-          ],
+          sources: finalSources,
           _debug: debugInfo
         },
         { status: 200, headers: CORS }
@@ -578,54 +713,10 @@ export async function GET(req) {
     }
   }
 
-  // DANH SÁCH VIDEO THEO TRANG
+  // =================================================================
+  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO THEO TRANG
+  // =================================================================
   try {
-    const wpUrl = `${baseDomain}/wp-json/wp/v2/posts?_embed&page=${page}&per_page=${per}${
-      q ? `&search=${encodeURIComponent(q)}` : ""
-    }`;
-    const wpRes = await fetchWithTimeout(wpUrl, { headers: reqHeaders });
-
-    if (wpRes.ok && (wpRes.headers.get("content-type") || "").includes("json")) {
-      const posts = await wpRes.json();
-      const totalPages = Math.max(
-        1,
-        parseInt(wpRes.headers.get("x-wp-totalpages") || "10", 10)
-      );
-      const total = parseInt(
-        wpRes.headers.get("x-wp-total") || String(posts.length * totalPages),
-        10
-      );
-
-      if (Array.isArray(posts) && posts.length > 0) {
-        const items = posts.map((p) => {
-          const contentHtml = p.content?.rendered || "";
-          const imgMatch = contentHtml.match(
-            /(?:data-src|data-original|src)=["'](https?:\/\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i
-          );
-          const thumb =
-            p._embedded?.["wp:featuredmedia"]?.[0]?.source_url ||
-            p.yoast_head_json?.og_image?.[0]?.url ||
-            (imgMatch ? imgMatch[1] : FALLBACK_THUMB);
-
-          return {
-            id: String(p.id),
-            slug: p.slug,
-            title: cleanText(p.title?.rendered || p.slug),
-            category: category === "all" ? "movie" : category,
-            thumbnail: thumb,
-            thumb,
-            poster: thumb,
-            image: thumb
-          };
-        });
-
-        return NextResponse.json(
-          { items, page, totalPages, total },
-          { headers: CORS }
-        );
-      }
-    }
-
     const pagePath = page > 1 ? `/page/${page}/` : "/";
     const htmlUrl = q
       ? `${baseDomain}${pagePath}?s=${encodeURIComponent(q)}`
