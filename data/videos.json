@@ -1,1 +1,5 @@
-
+[
+  {"id":1,"slug":"hoa-demo-mp4","title":"Video mẫu MP4","category":"demo","description":"Video mẫu định dạng mp4.","servers":[{"name":"Server 1 (MP4)","type":"mp4","url":"https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"}]},
+  {"id":2,"slug":"stream-demo-hls","title":"Luồng HLS mẫu","category":"movie","description":"Luồng m3u8 mẫu phát bằng hls.js.","servers":[{"name":"Server 1 (HLS)","type":"hls","url":"https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"},{"name":"Server 2 (MP4)","type":"mp4","url":"https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"}]},
+  {"id":3,"slug":"iframe-demo","title":"Nhúng iframe mẫu","category":"clip","description":"Ví dụ server dự phòng dạng iframe.","servers":[{"name":"Server iframe","type":"iframe","url":"https://www.youtube.com/embed/aqz-KE-bpKQ"}]}
+]
