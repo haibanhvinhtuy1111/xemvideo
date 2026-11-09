@@ -2,7 +2,35 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import Link from "next/link";
+
+function getSavedDomain() {
+  if (typeof window === "undefined") return "";
+  try {
+    const priorityKeys = [
+      "sourceDomain",
+      "domain",
+      "customDomain",
+      "source_domain",
+      "siteDomain",
+      "videoDomain"
+    ];
+    for (const k of priorityKeys) {
+      const val = localStorage.getItem(k);
+      if (val && val.trim()) return val.trim();
+    }
+    // Quét tự động mọi key trong localStorage có chứa chữ domain hoặc source
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (/domain|source|url/i.test(key || "")) {
+        const val = localStorage.getItem(key);
+        if (val && /^(https?:\/\/)?[a-z0-9-]+(\.[a-z0-9-]+)+/i.test(val.trim())) {
+          return val.trim();
+        }
+      }
+    }
+  } catch (_) {}
+  return "";
+}
 
 export default function WatchPage() {
   const params = useParams();
@@ -20,14 +48,7 @@ export default function WatchPage() {
     async function loadVideo() {
       setLoading(true);
       try {
-        // Lấy domain người dùng đã lưu ở nút "Nguồn" (nếu có)
-        const savedDomain =
-          typeof window !== "undefined"
-            ? localStorage.getItem("sourceDomain") ||
-              localStorage.getItem("domain") ||
-              ""
-            : "";
-
+        const savedDomain = getSavedDomain();
         const query = new URLSearchParams({ slug: rawSlug });
         if (savedDomain) query.set("domain", savedDomain);
 
@@ -40,12 +61,18 @@ export default function WatchPage() {
 
         if (res.ok && data && !data.error) {
           setVideo(data);
-          // Ưu tiên lấy từ mảng sources, nếu không có thì dựng từ url/embedUrl/videoUrl
           if (Array.isArray(data.sources) && data.sources.length > 0) {
             setActiveSource(data.sources[0]);
           } else {
             const fallbackUrl =
-              data.videoUrl || data.hlsUrl || data.mp4Url || data.embedUrl || data.iframe || data.url || data.src || "";
+              data.videoUrl ||
+              data.hlsUrl ||
+              data.mp4Url ||
+              data.embedUrl ||
+              data.iframe ||
+              data.url ||
+              data.src ||
+              "";
             if (fallbackUrl) {
               const isDirect =
                 fallbackUrl.includes(".m3u8") || fallbackUrl.includes(".mp4");
@@ -63,10 +90,10 @@ export default function WatchPage() {
             }
           }
         } else {
-          setVideo(null);
+          setVideo(data || null);
           setActiveSource(null);
         }
-      } catch (err) {
+      } catch (_) {
         if (isMounted) {
           setVideo(null);
           setActiveSource(null);
@@ -148,8 +175,23 @@ export default function WatchPage() {
                 )}
               </div>
             ) : (
-              <div className="p-6 rounded-xl bg-zinc-900/60 border border-zinc-800 text-zinc-400">
-                Chưa có luồng phát.
+              <div className="p-6 rounded-xl bg-zinc-900/60 border border-zinc-800 text-zinc-400 space-y-3">
+                <p>Chưa có luồng phát.</p>
+                {video?._debug && (
+                  <p className="text-xs text-zinc-500 font-mono">
+                    Nguồn: {video._debug.baseDomain} | WP: {video._debug.wpStatus} | HTML: {video._debug.htmlVia} ({video._debug.htmlLength || 0} bytes)
+                  </p>
+                )}
+                {video?.postLink && (
+                  <a
+                    href={video.postLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block px-3 py-1.5 rounded-lg bg-rose-600 text-white text-xs font-medium"
+                  >
+                    Mở trên trang gốc ↗
+                  </a>
+                )}
               </div>
             )}
           </>
