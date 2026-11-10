@@ -19,7 +19,9 @@ function decodeSlugParam(raw = "") {
       s = dec;
     }
   } catch (_) {}
-  return s.replace(/^\/+|\/+$/g, "");
+  return s
+    .replace(/__slash__/g, "/")
+    .replace(/^\/+|\/+$/g, "");
 }
 
 function getBackListUrl() {
@@ -64,7 +66,6 @@ export default function WatchPage() {
       try {
         const savedSource = typeof getSource === "function" ? getSource() : "";
 
-        // Lấy số trang & danh mục đang duyệt để gợi ý video cùng trang/danh mục đó
         let currentCat = "all";
         let currentPage = "1";
         try {
