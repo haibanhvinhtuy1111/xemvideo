@@ -41,21 +41,20 @@ const SORT_OPTIONS = [
 ];
 
 const STATE_STORAGE_KEY = "videosite_browse_state_v1";
-const CACHE_STORAGE_KEY = "videosite_list_cache_v1";
+const CACHE_STORAGE_KEY = "videosite_list_cache_v2";
 const SCROLL_STORAGE_KEY = "videosite_scroll_y_v1";
 
+// Giới hạn thanh phân trang tối đa 5-7 nút gọn gàng, không bao giờ xổ tràn hàng
 function buildPagination(currentPage, totalPages) {
   if (totalPages <= 1) return [1];
 
-  // Nếu tổng số trang <= 6 thì hiện đủ 1..totalPages
   if (totalPages <= 6) {
     return Array.from({ length: totalPages }, (_, i) => i + 1);
   }
 
   const pages = new Set();
-
-  // Luôn giữ trang đầu và trang hiện tại +- 1 (hoặc 1..4 nếu đang ở đầu)
   pages.add(1);
+
   const startNear = Math.max(1, currentPage - 1);
   const endNear = Math.min(
     totalPages,
@@ -65,7 +64,6 @@ function buildPagination(currentPage, totalPages) {
     pages.add(p);
   }
 
-  // Chỉ thêm tối đa 2 mốc nhảy chẵn chục nếu tổng số trang lớn (> 20)
   if (totalPages > 20) {
     const baseTen = Math.floor(currentPage / 10) * 10;
     for (let step = 1; step <= 2; step++) {
@@ -75,7 +73,6 @@ function buildPagination(currentPage, totalPages) {
       }
     }
   } else {
-    // Với các mục vừa phải (7 - 20 trang như Video thành viên), chỉ gắn thêm trang cuối
     pages.add(totalPages);
   }
 
@@ -93,7 +90,6 @@ function buildPagination(currentPage, totalPages) {
   return result;
 }
 
-// Đọc trạng thái đang duyệt từ URL hoặc sessionStorage
 function getInitialBrowseState() {
   if (typeof window === "undefined") {
     return { category: "all", page: 1, sortBy: "latest", q: "" };
@@ -147,7 +143,6 @@ export default function HomePage() {
   const shouldScrollTopRef = useRef(false);
   const pendingRestoreScrollRef = useRef(false);
 
-  // 1. Khôi phục đúng Trang, Danh mục, Tìm kiếm khi vừa mở hoặc bấm Quay lại
   useEffect(() => {
     const init = getInitialBrowseState();
     setCategory(init.category);
@@ -158,7 +153,6 @@ export default function HomePage() {
     pendingRestoreScrollRef.current = true;
     setReady(true);
 
-    // Lắng nghe nút Back / Forward của trình duyệt
     const handlePopState = () => {
       const st = getInitialBrowseState();
       setCategory(st.category);
@@ -172,7 +166,6 @@ export default function HomePage() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  // 2. Lưu vị trí cuộn chuột liên tục để khi bấm vào video rồi quay lại đứng đúng chỗ cũ
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onScroll = () => {
@@ -186,7 +179,6 @@ export default function HomePage() {
     return () => window.removeEventListener("scroll", onScroll);
   }, [loading]);
 
-  // Đóng menu Sắp xếp khi bấm ra ngoài
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (
@@ -200,7 +192,6 @@ export default function HomePage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // 3. Đồng bộ trạng thái vào URL & sessionStorage + Tải danh sách video (có Cache tức thì)
   useEffect(() => {
     if (!ready) return;
     let isMounted = true;
@@ -209,7 +200,6 @@ export default function HomePage() {
     const stateObj = { category, page, sortBy, q, domain: savedSource };
     const cacheKey = JSON.stringify(stateObj);
 
-    // Cập nhật thanh địa chỉ URL và sessionStorage để giữ nguyên trang khi F5 hoặc Back
     try {
       sessionStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(stateObj));
       const urlParams = new URLSearchParams();
@@ -226,7 +216,6 @@ export default function HomePage() {
     } catch (_) {}
 
     async function loadList() {
-      // Kiểm tra nếu vừa bấm Quay lại và trang này đã có trong Cache -> Hiển thị tức thì không cần xoay tải lại
       try {
         const rawCache = sessionStorage.getItem(CACHE_STORAGE_KEY);
         if (rawCache) {
@@ -235,7 +224,7 @@ export default function HomePage() {
             parsedCache.key === cacheKey &&
             Array.isArray(parsedCache.items) &&
             parsedCache.items.length > 0 &&
-            Date.now() - (parsedCache.ts || 0) < 10 * 60 * 1000
+            Date.now() - (parsedCache.ts || 0) < 5 * 60 * 1000
           ) {
             setItems(parsedCache.items);
             setTotalPages(parsedCache.totalPages || 1);
@@ -295,7 +284,6 @@ export default function HomePage() {
           setDynamicCats(loadedCats);
         }
 
-        // Lưu kết quả vào sessionStorage để khi bấm Quay lại từ trang xem video hiện ra ngay lập tức
         if (loadedItems.length > 0) {
           try {
             sessionStorage.setItem(
@@ -353,6 +341,7 @@ export default function HomePage() {
     pendingRestoreScrollRef.current = false;
     try {
       sessionStorage.setItem(SCROLL_STORAGE_KEY, "0");
+      sessionStorage.removeItem(CACHE_STORAGE_KEY);
     } catch (_) {}
     setCategory(slug);
     setQ("");
@@ -575,6 +564,9 @@ export default function HomePage() {
                       type="button"
                       onClick={() => {
                         shouldScrollTopRef.current = true;
+                        try {
+                          sessionStorage.removeItem(CACHE_STORAGE_KEY);
+                        } catch (_) {}
                         setSortBy(opt.id);
                         setSortOpen(false);
                         setPage(1);
@@ -634,7 +626,7 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Thanh phân trang */}
+        {/* Thanh phân trang rút gọn chuẩn */}
         {!loading && items.length > 0 && totalPages > 1 && (
           <div className="mt-10 pt-6 border-t border-slate-800/80 flex flex-col items-center gap-4">
             <div className="flex flex-wrap items-center justify-center gap-1.5">
