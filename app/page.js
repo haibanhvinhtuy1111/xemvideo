@@ -45,19 +45,38 @@ const CACHE_STORAGE_KEY = "videosite_list_cache_v1";
 const SCROLL_STORAGE_KEY = "videosite_scroll_y_v1";
 
 function buildPagination(currentPage, totalPages) {
+  if (totalPages <= 1) return [1];
+
+  // Nếu tổng số trang <= 6 thì hiện đủ 1..totalPages
+  if (totalPages <= 6) {
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }
+
   const pages = new Set();
-  const startNear = Math.max(1, currentPage - 2);
-  const endNear = Math.min(totalPages, Math.max(5, currentPage + 2));
+
+  // Luôn giữ trang đầu và trang hiện tại +- 1 (hoặc 1..4 nếu đang ở đầu)
+  pages.add(1);
+  const startNear = Math.max(1, currentPage - 1);
+  const endNear = Math.min(
+    totalPages,
+    currentPage <= 2 ? 4 : currentPage + 1
+  );
   for (let p = startNear; p <= endNear; p++) {
     pages.add(p);
   }
 
-  const baseTen = Math.floor(currentPage / 10) * 10;
-  for (let step = 1; step <= 3; step++) {
-    const milestone = baseTen + step * 10;
-    if (milestone > endNear && milestone <= totalPages) {
-      pages.add(milestone);
+  // Chỉ thêm tối đa 2 mốc nhảy chẵn chục nếu tổng số trang lớn (> 20)
+  if (totalPages > 20) {
+    const baseTen = Math.floor(currentPage / 10) * 10;
+    for (let step = 1; step <= 2; step++) {
+      const milestone = baseTen + step * 10;
+      if (milestone > endNear + 1 && milestone < totalPages) {
+        pages.add(milestone);
+      }
     }
+  } else {
+    // Với các mục vừa phải (7 - 20 trang như Video thành viên), chỉ gắn thêm trang cuối
+    pages.add(totalPages);
   }
 
   const sorted = [...pages].sort((a, b) => a - b);
@@ -68,7 +87,7 @@ function buildPagination(currentPage, totalPages) {
     }
     result.push(sorted[i]);
   }
-  if (sorted.length > 0 && sorted[sorted.length - 1] < totalPages) {
+  if (sorted[sorted.length - 1] < totalPages) {
     result.push("...");
   }
   return result;
