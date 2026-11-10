@@ -40,6 +40,10 @@ const SORT_OPTIONS = [
   { id: "comments", label: "Bình luận" }
 ];
 
+const STATE_STORAGE_KEY = "videosite_browse_state_v1";
+const CACHE_STORAGE_KEY = "videosite_list_cache_v1";
+const SCROLL_STORAGE_KEY = "videosite_scroll_y_v1";
+
 function buildPagination(currentPage, totalPages) {
   const pages = new Set();
   const startNear = Math.max(1, currentPage - 2);
@@ -70,33 +74,100 @@ function buildPagination(currentPage, totalPages) {
   return result;
 }
 
+// Đọc trạng thái đang duyệt từ URL hoặc sessionStorage
+function getInitialBrowseState() {
+  if (typeof window === "undefined") {
+    return { category: "all", page: 1, sortBy: "latest", q: "" };
+  }
+  try {
+    const sp = new URLSearchParams(window.location.search);
+    const hasUrlParams =
+      sp.has("page") || sp.has("category") || sp.has("sort") || sp.has("q");
+
+    if (hasUrlParams) {
+      return {
+        category: sp.get("category") || "all",
+        page: Math.max(1, parseInt(sp.get("page") || "1", 10) || 1),
+        sortBy: sp.get("sort") || "latest",
+        q: sp.get("q") || ""
+      };
+    }
+
+    const saved = sessionStorage.getItem(STATE_STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      return {
+        category: parsed.category || "all",
+        page: Math.max(1, parseInt(parsed.page || "1", 10) || 1),
+        sortBy: parsed.sortBy || "latest",
+        q: parsed.q || ""
+      };
+    }
+  } catch (_) {}
+
+  return { category: "all", page: 1, sortBy: "latest", q: "" };
+}
+
 export default function HomePage() {
-  const [items, setItems] = useState([]);
+  const [ready, setReady] = useState(false);
   const [category, setCategory] = useState("all");
   const [sortBy, setSortBy] = useState("latest");
-  const [sortOpen, setSortOpen] = useState(false);
-  const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
+  const [searchInput, setSearchInput] = useState("");
   const [page, setPage] = useState(1);
+
+  const [items, setItems] = useState([]);
   const [totalPages, setTotalPages] = useState(1);
   const [dynamicCats, setDynamicCats] = useState([]);
+  const [sortOpen, setSortOpen] = useState(false);
   const [showMoreTags, setShowMoreTags] = useState(false);
   const [jumpPageInput, setJumpPageInput] = useState("");
   const [loading, setLoading] = useState(true);
 
   const sortDropdownRef = useRef(null);
+  const shouldScrollTopRef = useRef(false);
+  const pendingRestoreScrollRef = useRef(false);
 
-  // Nhận tham số ?category=... nếu người dùng bấm vào Tag từ trang xem video
+  // 1. Khôi phục đúng Trang, Danh mục, Tìm kiếm khi vừa mở hoặc bấm Quay lại
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const sp = new URLSearchParams(window.location.search);
-      const urlCat = sp.get("category");
-      if (urlCat) {
-        setCategory(urlCat);
-      }
-    }
+    const init = getInitialBrowseState();
+    setCategory(init.category);
+    setPage(init.page);
+    setSortBy(init.sortBy);
+    setQ(init.q);
+    setSearchInput(init.q);
+    pendingRestoreScrollRef.current = true;
+    setReady(true);
+
+    // Lắng nghe nút Back / Forward của trình duyệt
+    const handlePopState = () => {
+      const st = getInitialBrowseState();
+      setCategory(st.category);
+      setPage(st.page);
+      setSortBy(st.sortBy);
+      setQ(st.q);
+      setSearchInput(st.q);
+      pendingRestoreScrollRef.current = true;
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
+  // 2. Lưu vị trí cuộn chuột liên tục để khi bấm vào video rồi quay lại đứng đúng chỗ cũ
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onScroll = () => {
+      if (!loading && window.scrollY > 0) {
+        try {
+          sessionStorage.setItem(SCROLL_STORAGE_KEY, String(window.scrollY));
+        } catch (_) {}
+      }
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [loading]);
+
+  // Đóng menu Sắp xếp khi bấm ra ngoài
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (
@@ -110,13 +181,74 @@ export default function HomePage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // 3. Đồng bộ trạng thái vào URL & sessionStorage + Tải danh sách video (có Cache tức thì)
   useEffect(() => {
+    if (!ready) return;
     let isMounted = true;
 
+    const savedSource = typeof getSource === "function" ? getSource() : "";
+    const stateObj = { category, page, sortBy, q, domain: savedSource };
+    const cacheKey = JSON.stringify(stateObj);
+
+    // Cập nhật thanh địa chỉ URL và sessionStorage để giữ nguyên trang khi F5 hoặc Back
+    try {
+      sessionStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(stateObj));
+      const urlParams = new URLSearchParams();
+      if (category && category !== "all") urlParams.set("category", category);
+      if (page > 1) urlParams.set("page", String(page));
+      if (sortBy && sortBy !== "latest") urlParams.set("sort", sortBy);
+      if (q) urlParams.set("q", q);
+
+      const newQuery = urlParams.toString();
+      const targetUrl = newQuery ? `/?${newQuery}` : "/";
+      if (window.location.pathname + window.location.search !== targetUrl) {
+        window.history.replaceState(null, "", targetUrl);
+      }
+    } catch (_) {}
+
     async function loadList() {
-      setLoading(true);
+      // Kiểm tra nếu vừa bấm Quay lại và trang này đã có trong Cache -> Hiển thị tức thì không cần xoay tải lại
       try {
-        const savedSource = typeof getSource === "function" ? getSource() : "";
+        const rawCache = sessionStorage.getItem(CACHE_STORAGE_KEY);
+        if (rawCache) {
+          const parsedCache = JSON.parse(rawCache);
+          if (
+            parsedCache.key === cacheKey &&
+            Array.isArray(parsedCache.items) &&
+            parsedCache.items.length > 0 &&
+            Date.now() - (parsedCache.ts || 0) < 10 * 60 * 1000
+          ) {
+            setItems(parsedCache.items);
+            setTotalPages(parsedCache.totalPages || 1);
+            if (Array.isArray(parsedCache.categories)) {
+              setDynamicCats(parsedCache.categories);
+            }
+            setLoading(false);
+
+            if (pendingRestoreScrollRef.current) {
+              pendingRestoreScrollRef.current = false;
+              const savedY = parseInt(
+                sessionStorage.getItem(SCROLL_STORAGE_KEY) || "0",
+                10
+              );
+              if (savedY > 0) {
+                setTimeout(() => {
+                  window.scrollTo({ top: savedY, behavior: "instant" });
+                }, 30);
+              }
+            }
+            return;
+          }
+        }
+      } catch (_) {}
+
+      setLoading(true);
+      if (shouldScrollTopRef.current) {
+        shouldScrollTopRef.current = false;
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+
+      try {
         const params = new URLSearchParams({
           category,
           page: String(page),
@@ -132,40 +264,91 @@ export default function HomePage() {
 
         if (!isMounted) return;
 
-        setItems(Array.isArray(data?.items) ? data.items : []);
-        setTotalPages(Math.max(1, Number(data?.totalPages) || 1));
-        if (Array.isArray(data?.categories) && data.categories.length > 0) {
-          setDynamicCats(data.categories);
+        const loadedItems = Array.isArray(data?.items) ? data.items : [];
+        const loadedTotalPages = Math.max(1, Number(data?.totalPages) || 1);
+        const loadedCats = Array.isArray(data?.categories)
+          ? data.categories
+          : [];
+
+        setItems(loadedItems);
+        setTotalPages(loadedTotalPages);
+        if (loadedCats.length > 0) {
+          setDynamicCats(loadedCats);
+        }
+
+        // Lưu kết quả vào sessionStorage để khi bấm Quay lại từ trang xem video hiện ra ngay lập tức
+        if (loadedItems.length > 0) {
+          try {
+            sessionStorage.setItem(
+              CACHE_STORAGE_KEY,
+              JSON.stringify({
+                key: cacheKey,
+                items: loadedItems,
+                totalPages: loadedTotalPages,
+                categories: loadedCats,
+                ts: Date.now()
+              })
+            );
+          } catch (_) {}
         }
       } catch (_) {
         if (isMounted) setItems([]);
       } finally {
-        if (isMounted) setLoading(false);
+        if (isMounted) {
+          setLoading(false);
+          if (pendingRestoreScrollRef.current) {
+            pendingRestoreScrollRef.current = false;
+            const savedY = parseInt(
+              sessionStorage.getItem(SCROLL_STORAGE_KEY) || "0",
+              10
+            );
+            if (savedY > 0) {
+              setTimeout(() => {
+                window.scrollTo({ top: savedY, behavior: "instant" });
+              }, 50);
+            }
+          }
+        }
       }
     }
 
     loadList();
-    if (typeof window !== "undefined") {
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    }
     return () => {
       isMounted = false;
     };
-  }, [category, q, page, sortBy]);
+  }, [ready, category, q, page, sortBy]);
+
+  const changePage = (newPage) => {
+    const target = Math.max(1, Math.min(totalPages, Number(newPage) || 1));
+    if (target === page) return;
+    shouldScrollTopRef.current = true;
+    pendingRestoreScrollRef.current = false;
+    try {
+      sessionStorage.setItem(SCROLL_STORAGE_KEY, "0");
+    } catch (_) {}
+    setPage(target);
+  };
 
   const handleSelectCategory = (slug) => {
+    shouldScrollTopRef.current = true;
+    pendingRestoreScrollRef.current = false;
+    try {
+      sessionStorage.setItem(SCROLL_STORAGE_KEY, "0");
+    } catch (_) {}
     setCategory(slug);
     setQ("");
     setSearchInput("");
     setPage(1);
     setShowMoreTags(false);
-    if (typeof window !== "undefined" && window.location.search) {
-      window.history.replaceState(null, "", "/");
-    }
   };
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
+    shouldScrollTopRef.current = true;
+    pendingRestoreScrollRef.current = false;
+    try {
+      sessionStorage.setItem(SCROLL_STORAGE_KEY, "0");
+    } catch (_) {}
     setQ(searchInput.trim());
     setPage(1);
   };
@@ -174,7 +357,7 @@ export default function HomePage() {
     e.preventDefault();
     const target = parseInt(jumpPageInput, 10);
     if (!isNaN(target) && target >= 1 && target <= totalPages) {
-      setPage(target);
+      changePage(target);
       setJumpPageInput("");
     }
   };
@@ -197,10 +380,10 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-[#0f172a] text-slate-100">
-      {/* Thanh điều hướng dính (Sticky) gọn nhẹ trên điện thoại */}
+      {/* Thanh điều hướng dính (Sticky) */}
       <div className="sticky top-0 z-20 border-b border-slate-800/80 bg-[#0f172a]/90 backdrop-blur-md">
         <div className="max-w-6xl mx-auto px-3 sm:px-4 py-2.5 sm:py-3.5 space-y-2.5">
-          {/* Ô tìm kiếm: dùng text-base (16px) trên mobile để iPhone không tự zoom */}
+          {/* Ô tìm kiếm */}
           <form
             onSubmit={handleSearchSubmit}
             className="flex items-center max-w-lg mx-auto rounded-full border border-slate-700/80 bg-slate-900/90 px-3.5 py-1.5 focus-within:border-indigo-400/80 transition-all"
@@ -230,6 +413,7 @@ export default function HomePage() {
                 onClick={() => {
                   setSearchInput("");
                   if (q) {
+                    shouldScrollTopRef.current = true;
                     setQ("");
                     setPage(1);
                   }
@@ -247,7 +431,7 @@ export default function HomePage() {
             </button>
           </form>
 
-          {/* Thanh danh mục: Vuốt ngang mượt trên điện thoại, tự xuống dòng trên máy tính */}
+          {/* Thanh danh mục vuốt ngang trên mobile */}
           <nav className="flex items-center sm:justify-center overflow-x-auto sm:flex-wrap gap-1.5 pb-1 sm:pb-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {MAIN_CATEGORIES.map((cat) => {
               const isActive = !q && category === cat.slug;
@@ -329,7 +513,7 @@ export default function HomePage() {
                   category.replace(/^tag\/|^category\//, "#")}
             </h2>
             <span className="text-[11px] sm:text-xs text-slate-400 shrink-0">
-              ({page}/{totalPages})
+              (Trang {page}/{totalPages})
             </span>
           </div>
 
@@ -371,6 +555,7 @@ export default function HomePage() {
                       key={opt.id}
                       type="button"
                       onClick={() => {
+                        shouldScrollTopRef.current = true;
                         setSortBy(opt.id);
                         setSortOpen(false);
                         setPage(1);
@@ -393,7 +578,7 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* Lưới Video: 2 cột trên điện thoại, 3-4 cột trên máy tính */}
+        {/* Lưới Video */}
         {loading ? (
           <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
             {Array.from({ length: 12 }).map((_, i) => (
@@ -430,7 +615,7 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Thanh phân trang tối ưu nút bấm cho cả điện thoại & máy tính */}
+        {/* Thanh phân trang */}
         {!loading && items.length > 0 && totalPages > 1 && (
           <div className="mt-10 pt-6 border-t border-slate-800/80 flex flex-col items-center gap-4">
             <div className="flex flex-wrap items-center justify-center gap-1.5">
@@ -443,14 +628,14 @@ export default function HomePage() {
                 <>
                   <button
                     type="button"
-                    onClick={() => setPage(1)}
+                    onClick={() => changePage(1)}
                     className="px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-xs font-medium text-slate-200 transition"
                   >
                     « First
                   </button>
                   <button
                     type="button"
-                    onClick={() => setPage(Math.max(1, page - 1))}
+                    onClick={() => changePage(page - 1)}
                     className="px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-xs font-medium text-slate-200 transition"
                   >
                     «
@@ -470,7 +655,7 @@ export default function HomePage() {
                   <button
                     key={tok}
                     type="button"
-                    onClick={() => setPage(tok)}
+                    onClick={() => changePage(tok)}
                     className={`min-w-[34px] px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition ${
                       page === tok
                         ? "bg-indigo-500 border-indigo-400 text-white shadow-sm shadow-indigo-500/30"
@@ -486,14 +671,14 @@ export default function HomePage() {
                 <>
                   <button
                     type="button"
-                    onClick={() => setPage(Math.min(totalPages, page + 1))}
+                    onClick={() => changePage(page + 1)}
                     className="px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-xs font-medium text-slate-200 transition"
                   >
                     »
                   </button>
                   <button
                     type="button"
-                    onClick={() => setPage(totalPages)}
+                    onClick={() => changePage(totalPages)}
                     className="px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-xs font-medium text-slate-200 transition"
                   >
                     Last »
