@@ -2,7 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 
-export default function Player({ video, src, url, type, poster, sources: propSources }) {
+export default function Player({
+  video,
+  src,
+  url,
+  type,
+  poster,
+  sources: propSources
+}) {
   const videoRef = useRef(null);
   const [activeIdx, setActiveIdx] = useState(0);
   const [useProxyStream, setUseProxyStream] = useState(false);
@@ -33,7 +40,9 @@ export default function Player({ video, src, url, type, poster, sources: propSou
             type:
               type ||
               video?.type ||
-              (fallbackUrl.includes(".m3u8")
+              (fallbackUrl.includes(".m3u8") ||
+              fallbackUrl.includes("rawProxy=1") ||
+              fallbackUrl.includes("hlsProxy=1")
                 ? "hls"
                 : fallbackUrl.includes(".mp4")
                 ? "mp4"
@@ -46,7 +55,9 @@ export default function Player({ video, src, url, type, poster, sources: propSou
   const rawActiveUrl = current?.url || current?.src || "";
   const activeType =
     current?.type ||
-    (rawActiveUrl.includes(".m3u8")
+    (rawActiveUrl.includes(".m3u8") ||
+    rawActiveUrl.includes("rawProxy=1") ||
+    rawActiveUrl.includes("hlsProxy=1")
       ? "hls"
       : rawActiveUrl.includes(".mp4")
       ? "mp4"
@@ -55,19 +66,26 @@ export default function Player({ video, src, url, type, poster, sources: propSou
   const activeUrl =
     useProxyStream && current?.proxyUrl ? current.proxyUrl : rawActiveUrl;
 
+  // Reset về Server đầu tiên khi đổi sang bài video khác
   useEffect(() => {
     setActiveIdx(0);
     setUseProxyStream(false);
   }, [video?.slug, fallbackUrl]);
 
+  // Reset trạng thái fallback proxy khi người dùng bấm đổi Server
   useEffect(() => {
     setUseProxyStream(false);
   }, [activeIdx]);
 
+  // Xử lý phát luồng HLS (.m3u8) và MP4 trực tiếp
   useEffect(() => {
     if (!activeUrl || activeType === "iframe" || !videoRef.current) return;
     const el = videoRef.current;
-    const isHlsStream = activeType === "hls" || activeUrl.includes(".m3u8");
+    const isHlsStream =
+      activeType === "hls" ||
+      activeUrl.includes(".m3u8") ||
+      activeUrl.includes("rawProxy=1") ||
+      activeUrl.includes("hlsProxy=1");
 
     if (!isHlsStream) {
       el.src = activeUrl;
@@ -75,19 +93,35 @@ export default function Player({ video, src, url, type, poster, sources: propSou
     }
 
     let hlsInstance = null;
+
     const initHls = () => {
       if (window.Hls && window.Hls.isSupported()) {
         hlsInstance = new window.Hls({
           enableWorker: true,
-          lowLatencyMode: false
+          lowLatencyMode: false,
+          xhrSetup: (xhr) => {
+            xhr.withCredentials = false;
+          }
         });
         hlsInstance.loadSource(activeUrl);
         hlsInstance.attachMedia(el);
+        hlsInstance.on(window.Hls.Events.MANIFEST_PARSED, () => {
+          el.play().catch(() => {});
+        });
         hlsInstance.on(window.Hls.Events.ERROR, (_, data) => {
-          // Nếu luồng HLS trực tiếp bị chặn CORS/Referer, tự động chuyển sang luồng Proxy
-          if (data.fatal && !useProxyStream && current?.proxyUrl) {
-            hlsInstance.destroy();
-            setUseProxyStream(true);
+          if (data.fatal) {
+            if (
+              !useProxyStream &&
+              current?.proxyUrl &&
+              current.proxyUrl !== activeUrl
+            ) {
+              hlsInstance.destroy();
+              setUseProxyStream(true);
+            } else if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+              hlsInstance.startLoad();
+            } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+              hlsInstance.recoverMediaError();
+            }
           }
         });
       } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
@@ -98,15 +132,24 @@ export default function Player({ video, src, url, type, poster, sources: propSou
     if (window.Hls) {
       initHls();
     } else {
-      const script = document.createElement("script");
-      script.src = "https://cdn.jsdelivr.net/npm/hls.js@latest";
-      script.async = true;
-      script.onload = initHls;
-      document.head.appendChild(script);
+      const existingScript = document.querySelector(
+        'script[src*="hls.js"]'
+      );
+      if (existingScript) {
+        existingScript.addEventListener("load", initHls);
+      } else {
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/hls.js@latest";
+        script.async = true;
+        script.onload = initHls;
+        document.head.appendChild(script);
+      }
     }
 
     return () => {
-      if (hlsInstance) hlsInstance.destroy();
+      if (hlsInstance) {
+        hlsInstance.destroy();
+      }
     };
   }, [activeUrl, activeType, useProxyStream, current]);
 
@@ -117,7 +160,8 @@ export default function Player({ video, src, url, type, poster, sources: propSou
         {video?._debug && (
           <div className="text-xs text-zinc-500 font-mono space-y-1 pt-2 border-t border-zinc-800">
             <p>
-              Domain: {video._debug.baseDomain} | HTML: {video._debug.htmlVia} ({video._debug.htmlLength || 0} bytes)
+              Domain: {video._debug.baseDomain} | HTML: {video._debug.htmlVia} (
+              {video._debug.htmlLength || 0} bytes)
             </p>
             {video._debug.playerSnippet && (
               <pre className="p-2 bg-black/50 rounded overflow-x-auto whitespace-pre-wrap text-[11px] text-zinc-400">
@@ -130,6 +174,8 @@ export default function Player({ video, src, url, type, poster, sources: propSou
     );
   }
 
+  const isLocalProxyIframe = activeUrl.startsWith("/");
+
   return (
     <div className="space-y-4">
       <div className="relative aspect-video w-full bg-black rounded-xl overflow-hidden border border-zinc-800">
@@ -141,7 +187,9 @@ export default function Player({ video, src, url, type, poster, sources: propSou
             className="w-full h-full border-0 overflow-hidden"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
             allowFullScreen
-            referrerPolicy="no-referrer"
+            referrerPolicy={
+              isLocalProxyIframe ? "same-origin" : "no-referrer"
+            }
           />
         ) : (
           <video
@@ -152,7 +200,11 @@ export default function Player({ video, src, url, type, poster, sources: propSou
             autoPlay
             playsInline
             onError={() => {
-              if (!useProxyStream && current?.proxyUrl) {
+              if (
+                !useProxyStream &&
+                current?.proxyUrl &&
+                current.proxyUrl !== activeUrl
+              ) {
                 setUseProxyStream(true);
               }
             }}
@@ -190,11 +242,16 @@ export default function Player({ video, src, url, type, poster, sources: propSou
 
       {showDebug && (
         <div className="p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-xs font-mono text-zinc-400 space-y-1 overflow-x-auto">
-          <p className="text-zinc-300">
+          <p className="text-zinc-300 break-all">
             Đang phát ({activeType}): {activeUrl}
           </p>
+          {current?.rawUrl && (
+            <p className="text-emerald-400 break-all">
+              Link gốc đã bóc tách: {current.rawUrl}
+            </p>
+          )}
           {video?._debug?.playerSnippet && (
-            <pre className="p-2 bg-black/60 rounded whitespace-pre-wrap text-[11px]">
+            <pre className="p-2 bg-black/60 rounded whitespace-pre-wrap break-all text-[11px]">
               {video._debug.playerSnippet}
             </pre>
           )}
