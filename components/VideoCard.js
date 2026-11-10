@@ -2,6 +2,12 @@
 
 import Link from "next/link";
 
+function encodeSafeWatchSlug(rawSlug = "") {
+  const clean = String(rawSlug || "").replace(/^\/+|\/+$/g, "");
+  // Mã hóa dấu "/" thành "__slash__" để route [slug] đơn của Next.js luôn nhận đủ 100%
+  return encodeURIComponent(clean.replace(/\//g, "__slash__"));
+}
+
 export default function VideoCard({ video, item }) {
   const v = video || item || {};
   const slug = v.slug || v.id || "";
@@ -19,10 +25,9 @@ export default function VideoCard({ video, item }) {
 
   return (
     <Link
-      href={`/watch/${encodeURIComponent(slug)}`}
+      href={`/watch/${encodeSafeWatchSlug(slug)}`}
       className="group flex flex-col overflow-hidden rounded-2xl bg-slate-800/45 border border-slate-800/90 hover:border-indigo-500/40 hover:bg-slate-800/75 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-indigo-950/30"
     >
-      {/* Khung ảnh Thumbnail */}
       <div className="relative aspect-video w-full overflow-hidden bg-slate-900">
         <img
           src={thumb}
@@ -35,10 +40,8 @@ export default function VideoCard({ video, item }) {
           className="h-full w-full object-cover object-center transition-transform duration-500 ease-out group-hover:scale-105"
         />
 
-        {/* Lớp phủ mờ nhẹ tự nhiên */}
         <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-transparent to-transparent opacity-60 group-hover:opacity-80 transition-opacity" />
 
-        {/* Nút Play tối giản ở giữa khi di chuột */}
         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300">
           <div className="flex h-11 w-11 items-center justify-center rounded-full bg-indigo-500/90 text-white backdrop-blur-sm shadow-md transform scale-90 group-hover:scale-100 transition-transform">
             <svg
@@ -56,6 +59,12 @@ export default function VideoCard({ video, item }) {
           </div>
         </div>
 
+        {slug.startsWith("bai-viet/") && (
+          <span className="absolute top-2 left-2 rounded-md bg-emerald-500/90 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow">
+            Thành viên
+          </span>
+        )}
+
         {v.duration && (
           <span className="absolute bottom-2 right-2 rounded-md bg-slate-950/80 backdrop-blur-xs px-1.5 py-0.5 text-[11px] font-medium text-slate-200">
             {v.duration}
@@ -63,7 +72,6 @@ export default function VideoCard({ video, item }) {
         )}
       </div>
 
-      {/* Tiêu đề & Thông số tương tác */}
       <div className="flex flex-1 flex-col justify-between p-3.5">
         <h3
           title={title}
@@ -72,9 +80,7 @@ export default function VideoCard({ video, item }) {
           {title}
         </h3>
 
-        {/* Hàng thông số: Lượt xem - Bình luận - Lượt thích */}
         <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex items-center gap-4 text-[11.5px] text-slate-400">
-          {/* Lượt xem */}
           <span className="inline-flex items-center gap-1.5" title="Lượt xem">
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -92,7 +98,6 @@ export default function VideoCard({ video, item }) {
             <span>{views}</span>
           </span>
 
-          {/* Bình luận */}
           <span className="inline-flex items-center gap-1" title="Bình luận">
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -109,7 +114,6 @@ export default function VideoCard({ video, item }) {
             <span>{comments}</span>
           </span>
 
-          {/* Lượt thích */}
           <span className="inline-flex items-center gap-1" title="Lượt thích">
             <svg
               xmlns="http://www.w3.org/2000/svg"
