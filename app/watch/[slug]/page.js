@@ -7,17 +7,33 @@ import Player from "@/components/Player";
 import VideoCard from "@/components/VideoCard";
 import { getSource } from "@/config/site";
 
+function decodeSlugParam(raw = "") {
+  let s = String(raw || "");
+  try {
+    for (let i = 0; i < 3; i++) {
+      if (!s.includes("%")) break;
+      const dec = decodeURIComponent(s);
+      if (dec === s) break;
+      s = dec;
+    }
+  } catch (_) {}
+  return s.replace(/^\/+|\/+$/g, "");
+}
+
 export default function WatchPage() {
   const params = useParams();
   const router = useRouter();
-  const rawSlug = Array.isArray(params?.slug) ? params.slug[0] : params?.slug;
+  const rawParam = Array.isArray(params?.slug)
+    ? params.slug.join("/")
+    : params?.slug || "";
+  const cleanSlug = decodeSlugParam(rawParam);
 
   const [video, setVideo] = useState(null);
   const [related, setRelated] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!rawSlug) return;
+    if (!cleanSlug) return;
     let isMounted = true;
 
     async function loadData() {
@@ -27,7 +43,7 @@ export default function WatchPage() {
       }
       try {
         const savedSource = typeof getSource === "function" ? getSource() : "";
-        const query = new URLSearchParams({ slug: rawSlug });
+        const query = new URLSearchParams({ slug: cleanSlug });
         if (savedSource) query.set("domain", savedSource);
 
         const listQuery = new URLSearchParams({ category: "all", page: "1" });
@@ -47,7 +63,7 @@ export default function WatchPage() {
         if (Array.isArray(listData?.items)) {
           setRelated(
             listData.items
-              .filter((x) => x.slug !== rawSlug)
+              .filter((x) => decodeSlugParam(x.slug) !== cleanSlug)
               .slice(0, 8)
           );
         }
@@ -62,13 +78,12 @@ export default function WatchPage() {
     return () => {
       isMounted = false;
     };
-  }, [rawSlug]);
+  }, [cleanSlug]);
 
   const tags = Array.isArray(video?.tags) ? video.tags : [];
 
   return (
     <div className="max-w-5xl mx-auto px-3 sm:px-6 py-4 sm:py-6 text-slate-100 space-y-8">
-      {/* Khu vực trình phát chính */}
       <div>
         <button
           type="button"
@@ -92,10 +107,9 @@ export default function WatchPage() {
 
             <div className="pt-1 space-y-3">
               <h1 className="text-base sm:text-xl md:text-2xl font-semibold leading-snug text-slate-100">
-                {video?.title || rawSlug}
+                {video?.title || cleanSlug}
               </h1>
 
-              {/* Danh sách Thẻ (Tags) của bài viết */}
               {tags.length > 0 && (
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
                   <span className="text-xs text-slate-400 mr-1">Thẻ:</span>
@@ -115,7 +129,6 @@ export default function WatchPage() {
         )}
       </div>
 
-      {/* Danh sách Video đề xuất bên dưới */}
       {related.length > 0 && (
         <div className="pt-6 border-t border-slate-800/80 space-y-4">
           <div className="flex items-center gap-2">
