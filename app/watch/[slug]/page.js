@@ -149,12 +149,12 @@ export default function WatchPage() {
   const tags = Array.isArray(video?.tags) ? video.tags : [];
 
   return (
-    <div className="max-w-5xl mx-auto px-3 sm:px-6 py-4 sm:py-6 text-slate-100 space-y-8">
+    <div className="mx-auto max-w-5xl space-y-8 px-3 py-4 text-textMain sm:px-6 sm:py-6">
       <div>
         <button
           type="button"
           onClick={handleBackToList}
-          className="inline-flex items-center gap-1.5 rounded-full bg-slate-800/70 hover:bg-slate-800 border border-slate-700/60 px-3.5 py-1.5 text-xs font-medium text-slate-300 hover:text-white mb-3.5 transition"
+          className="mb-3.5 inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3.5 py-1.5 text-xs font-medium text-textSub shadow-sm transition hover:border-primary/40 hover:bg-sub hover:text-textMain"
         >
           <span>←</span>
           <span>Quay lại danh sách</span>
@@ -162,35 +162,37 @@ export default function WatchPage() {
 
         {loading ? (
           <div className="space-y-4">
-            <div className="aspect-video w-full bg-slate-800/60 animate-pulse rounded-xl sm:rounded-2xl flex items-center justify-center text-sm text-slate-400">
+            <div className="flex aspect-video w-full animate-pulse items-center justify-center rounded-xl border border-border bg-sub text-sm text-textSub sm:rounded-2xl">
               Đang tải luồng phát...
             </div>
-            <div className="h-6 bg-slate-800/60 rounded-lg w-3/4 animate-pulse" />
+            <div className="h-6 w-3/4 animate-pulse rounded-lg bg-sub" />
           </div>
         ) : (
           <div className="space-y-4">
             <Player video={video} />
 
-            <div className="pt-1 space-y-3">
+            <div className="space-y-3 rounded-2xl border border-border bg-surface p-4 shadow-sm sm:p-5">
               <div className="flex flex-wrap items-center gap-2">
                 {isMemberVideo && (
-                  <span className="rounded-md bg-emerald-500/20 border border-emerald-500/30 px-2 py-0.5 text-xs font-semibold text-emerald-300">
+                  <span className="rounded-md border border-success/30 bg-primary-light px-2 py-0.5 text-xs font-semibold text-success">
                     Video thành viên
                   </span>
                 )}
-                <h1 className="text-base sm:text-xl md:text-2xl font-semibold leading-snug text-slate-100">
+                <h1 className="text-base font-semibold leading-snug text-textMain sm:text-xl md:text-2xl">
                   {video?.title || cleanSlug}
                 </h1>
               </div>
 
               {tags.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                  <span className="text-xs text-slate-400 mr-1">Thẻ:</span>
+                <div className="flex flex-wrap items-center gap-1.5 border-t border-border pt-3">
+                  <span className="mr-1 text-xs font-medium text-textSub">
+                    Thẻ:
+                  </span>
                   {tags.map((t) => (
                     <Link
                       key={t.slug}
                       href={`/?category=${encodeURIComponent(t.slug)}&page=1`}
-                      className="px-2.5 py-1 rounded-full bg-slate-800/70 hover:bg-indigo-500 border border-slate-700/50 text-xs text-slate-300 hover:text-white transition"
+                      className="rounded-full border border-border bg-sub px-2.5 py-1 text-xs text-textSub transition hover:border-primary hover:bg-primary hover:text-primary-foreground"
                     >
                       #{t.name}
                     </Link>
@@ -203,17 +205,17 @@ export default function WatchPage() {
       </div>
 
       {related.length > 0 && (
-        <div className="pt-6 border-t border-slate-800/80 space-y-4">
+        <div className="space-y-4 border-t border-border pt-6">
           <div className="flex items-center gap-2">
-            <span className="inline-block w-1.5 h-5 rounded-full bg-indigo-400" />
-            <h2 className="text-base sm:text-lg font-semibold text-slate-100">
+            <span className="inline-block h-5 w-1.5 rounded-full bg-primary" />
+            <h2 className="text-base font-semibold text-textMain sm:text-lg">
               {isMemberVideo
                 ? "Video thành viên khác"
                 : "Video cùng trang đề xuất"}
             </h2>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 sm:gap-5 md:grid-cols-3 lg:grid-cols-4">
             {related.map((item, idx) => (
               <VideoCard key={item.slug || idx} video={item} />
             ))}
