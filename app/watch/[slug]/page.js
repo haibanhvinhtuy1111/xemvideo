@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import Player from "@/components/Player";
+import VideoCard from "@/components/VideoCard";
 import { getSource } from "@/config/site";
 
 export default function WatchPage() {
@@ -11,24 +13,44 @@ export default function WatchPage() {
   const rawSlug = Array.isArray(params?.slug) ? params.slug[0] : params?.slug;
 
   const [video, setVideo] = useState(null);
+  const [related, setRelated] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!rawSlug) return;
     let isMounted = true;
 
-    async function loadVideo() {
+    async function loadData() {
       setLoading(true);
+      if (typeof window !== "undefined") {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
       try {
         const savedSource = typeof getSource === "function" ? getSource() : "";
         const query = new URLSearchParams({ slug: rawSlug });
         if (savedSource) query.set("domain", savedSource);
 
-        const res = await fetch(`/api/videos?${query.toString()}`, {
-          cache: "no-store"
-        });
-        const data = await res.json();
-        if (isMounted) setVideo(data);
+        const listQuery = new URLSearchParams({ category: "all", page: "1" });
+        if (savedSource) listQuery.set("domain", savedSource);
+
+        const [videoRes, listRes] = await Promise.all([
+          fetch(`/api/videos?${query.toString()}`, { cache: "no-store" }),
+          fetch(`/api/videos?${listQuery.toString()}`, { cache: "no-store" })
+        ]);
+
+        const videoData = await videoRes.json();
+        const listData = await listRes.json();
+
+        if (!isMounted) return;
+
+        setVideo(videoData);
+        if (Array.isArray(listData?.items)) {
+          setRelated(
+            listData.items
+              .filter((x) => x.slug !== rawSlug)
+              .slice(0, 8)
+          );
+        }
       } catch (_) {
         if (isMounted) setVideo(null);
       } finally {
@@ -36,32 +58,79 @@ export default function WatchPage() {
       }
     }
 
-    loadVideo();
+    loadData();
     return () => {
       isMounted = false;
     };
   }, [rawSlug]);
 
-  return (
-    <div className="max-w-4xl mx-auto p-4 md:p-8 text-zinc-100">
-      <button
-        onClick={() => router.back()}
-        className="text-sm text-zinc-400 hover:text-white mb-4 inline-flex items-center gap-1"
-      >
-        ← Quay lại
-      </button>
+  const tags = Array.isArray(video?.tags) ? video.tags : [];
 
-      {loading ? (
-        <div className="aspect-video w-full bg-zinc-900 animate-pulse rounded-xl flex items-center justify-center text-zinc-500">
-          Đang tải luồng phát...
+  return (
+    <div className="max-w-5xl mx-auto px-3 sm:px-6 py-4 sm:py-6 text-slate-100 space-y-8">
+      {/* Khu vực trình phát chính */}
+      <div>
+        <button
+          type="button"
+          onClick={() => router.back()}
+          className="inline-flex items-center gap-1.5 rounded-full bg-slate-800/70 hover:bg-slate-800 border border-slate-700/60 px-3.5 py-1.5 text-xs font-medium text-slate-300 hover:text-white mb-3.5 transition"
+        >
+          <span>←</span>
+          <span>Quay lại</span>
+        </button>
+
+        {loading ? (
+          <div className="space-y-4">
+            <div className="aspect-video w-full bg-slate-800/60 animate-pulse rounded-xl sm:rounded-2xl flex items-center justify-center text-sm text-slate-400">
+              Đang tải luồng phát...
+            </div>
+            <div className="h-6 bg-slate-800/60 rounded-lg w-3/4 animate-pulse" />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <Player video={video} />
+
+            <div className="pt-1 space-y-3">
+              <h1 className="text-base sm:text-xl md:text-2xl font-semibold leading-snug text-slate-100">
+                {video?.title || rawSlug}
+              </h1>
+
+              {/* Danh sách Thẻ (Tags) của bài viết */}
+              {tags.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  <span className="text-xs text-slate-400 mr-1">Thẻ:</span>
+                  {tags.map((t) => (
+                    <Link
+                      key={t.slug}
+                      href={`/?category=${encodeURIComponent(t.slug)}`}
+                      className="px-2.5 py-1 rounded-full bg-slate-800/70 hover:bg-indigo-500 border border-slate-700/50 text-xs text-slate-300 hover:text-white transition"
+                    >
+                      #{t.name}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Danh sách Video đề xuất bên dưới */}
+      {related.length > 0 && (
+        <div className="pt-6 border-t border-slate-800/80 space-y-4">
+          <div className="flex items-center gap-2">
+            <span className="inline-block w-1.5 h-5 rounded-full bg-indigo-400" />
+            <h2 className="text-base sm:text-lg font-semibold text-slate-100">
+              Video mới đề xuất
+            </h2>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
+            {related.map((item, idx) => (
+              <VideoCard key={item.slug || idx} video={item} />
+            ))}
+          </div>
         </div>
-      ) : (
-        <>
-          <h1 className="text-xl md:text-2xl font-bold mb-4">
-            {video?.title || rawSlug}
-          </h1>
-          <Player video={video} />
-        </>
       )}
     </div>
   );
