@@ -4,12 +4,11 @@ import { useEffect, useRef, useState } from "react";
 
 export default function Player({ video, src, url, type, poster, sources: propSources }) {
   const videoRef = useRef(null);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [useProxyStream, setUseProxyStream] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
 
-  // Gom tất cả nguồn phát từ props hoặc từ object video
-  const rawSources =
-    propSources ||
-    video?.sources ||
-    [];
+  const rawSources = propSources || video?.sources || [];
 
   const fallbackUrl =
     src ||
@@ -43,32 +42,34 @@ export default function Player({ video, src, url, type, poster, sources: propSou
         ]
       : [];
 
-  const [activeIdx, setActiveIdx] = useState(0);
   const current = normalizedSources[activeIdx] || normalizedSources[0] || null;
-  const activeUrl = current?.url || current?.src || "";
+  const rawActiveUrl = current?.url || current?.src || "";
   const activeType =
     current?.type ||
-    (activeUrl.includes(".m3u8")
+    (rawActiveUrl.includes(".m3u8")
       ? "hls"
-      : activeUrl.includes(".mp4")
+      : rawActiveUrl.includes(".mp4")
       ? "mp4"
       : "iframe");
 
+  const activeUrl =
+    useProxyStream && current?.proxyUrl ? current.proxyUrl : rawActiveUrl;
+
   useEffect(() => {
     setActiveIdx(0);
+    setUseProxyStream(false);
   }, [video?.slug, fallbackUrl]);
 
-  // Tự động nạp hls.js khi gặp luồng .m3u8 trên Chrome / Brave / Edge
+  useEffect(() => {
+    setUseProxyStream(false);
+  }, [activeIdx]);
+
   useEffect(() => {
     if (!activeUrl || activeType === "iframe" || !videoRef.current) return;
     const el = videoRef.current;
+    const isHlsStream = activeType === "hls" || activeUrl.includes(".m3u8");
 
-    if (!activeUrl.includes(".m3u8")) {
-      el.src = activeUrl;
-      return;
-    }
-
-    if (el.canPlayType("application/vnd.apple.mpegurl")) {
+    if (!isHlsStream) {
       el.src = activeUrl;
       return;
     }
@@ -76,10 +77,20 @@ export default function Player({ video, src, url, type, poster, sources: propSou
     let hlsInstance = null;
     const initHls = () => {
       if (window.Hls && window.Hls.isSupported()) {
-        hlsInstance = new window.Hls();
+        hlsInstance = new window.Hls({
+          enableWorker: true,
+          lowLatencyMode: false
+        });
         hlsInstance.loadSource(activeUrl);
         hlsInstance.attachMedia(el);
-      } else {
+        hlsInstance.on(window.Hls.Events.ERROR, (_, data) => {
+          // Nếu luồng HLS trực tiếp bị chặn CORS/Referer, tự động chuyển sang luồng Proxy
+          if (data.fatal && !useProxyStream && current?.proxyUrl) {
+            hlsInstance.destroy();
+            setUseProxyStream(true);
+          }
+        });
+      } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
         el.src = activeUrl;
       }
     };
@@ -97,7 +108,7 @@ export default function Player({ video, src, url, type, poster, sources: propSou
     return () => {
       if (hlsInstance) hlsInstance.destroy();
     };
-  }, [activeUrl, activeType]);
+  }, [activeUrl, activeType, useProxyStream, current]);
 
   if (!activeUrl) {
     return (
@@ -106,10 +117,10 @@ export default function Player({ video, src, url, type, poster, sources: propSou
         {video?._debug && (
           <div className="text-xs text-zinc-500 font-mono space-y-1 pt-2 border-t border-zinc-800">
             <p>
-              Domain: {video._debug.baseDomain} | WP: {video._debug.wpStatus} | HTML: {video._debug.htmlVia} ({video._debug.htmlLength || 0} bytes)
+              Domain: {video._debug.baseDomain} | HTML: {video._debug.htmlVia} ({video._debug.htmlLength || 0} bytes)
             </p>
             {video._debug.playerSnippet && (
-              <pre className="p-2 bg-black/50 rounded overflow-x-auto text-[11px] text-zinc-400">
+              <pre className="p-2 bg-black/50 rounded overflow-x-auto whitespace-pre-wrap text-[11px] text-zinc-400">
                 {video._debug.playerSnippet}
               </pre>
             )}
@@ -126,10 +137,11 @@ export default function Player({ video, src, url, type, poster, sources: propSou
           <iframe
             key={activeUrl}
             src={activeUrl}
-            className="w-full h-full border-0"
+            scrolling="no"
+            className="w-full h-full border-0 overflow-hidden"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
             allowFullScreen
-            referrerPolicy="no-referrer-when-downgrade"
+            referrerPolicy="no-referrer"
           />
         ) : (
           <video
@@ -139,12 +151,17 @@ export default function Player({ video, src, url, type, poster, sources: propSou
             controls
             autoPlay
             playsInline
+            onError={() => {
+              if (!useProxyStream && current?.proxyUrl) {
+                setUseProxyStream(true);
+              }
+            }}
             className="w-full h-full object-contain"
           />
         )}
       </div>
 
-      {normalizedSources.length > 1 && (
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap gap-2">
           {normalizedSources.map((s, idx) => (
             <button
@@ -160,6 +177,27 @@ export default function Player({ video, src, url, type, poster, sources: propSou
               {s.label || s.name || `Server #${idx + 1}`}
             </button>
           ))}
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setShowDebug(!showDebug)}
+          className="text-xs text-zinc-500 hover:text-zinc-300 underline"
+        >
+          {showDebug ? "Ẩn chi tiết nguồn" : "🔍 Xem link nguồn (Debug)"}
+        </button>
+      </div>
+
+      {showDebug && (
+        <div className="p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-xs font-mono text-zinc-400 space-y-1 overflow-x-auto">
+          <p className="text-zinc-300">
+            Đang phát ({activeType}): {activeUrl}
+          </p>
+          {video?._debug?.playerSnippet && (
+            <pre className="p-2 bg-black/60 rounded whitespace-pre-wrap text-[11px]">
+              {video._debug.playerSnippet}
+            </pre>
+          )}
         </div>
       )}
     </div>
