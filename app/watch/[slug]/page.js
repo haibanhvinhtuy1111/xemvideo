@@ -7,6 +7,8 @@ import Player from "@/components/Player";
 import VideoCard from "@/components/VideoCard";
 import { getSource } from "@/config/site";
 
+const STATE_STORAGE_KEY = "videosite_browse_state_v1";
+
 function decodeSlugParam(raw = "") {
   let s = String(raw || "");
   try {
@@ -18,6 +20,24 @@ function decodeSlugParam(raw = "") {
     }
   } catch (_) {}
   return s.replace(/^\/+|\/+$/g, "");
+}
+
+function getBackListUrl() {
+  if (typeof window === "undefined") return "/";
+  try {
+    const raw = sessionStorage.getItem(STATE_STORAGE_KEY);
+    if (raw) {
+      const st = JSON.parse(raw);
+      const sp = new URLSearchParams();
+      if (st.category && st.category !== "all") sp.set("category", st.category);
+      if (st.page && Number(st.page) > 1) sp.set("page", String(st.page));
+      if (st.sortBy && st.sortBy !== "latest") sp.set("sort", st.sortBy);
+      if (st.q) sp.set("q", st.q);
+      const qs = sp.toString();
+      return qs ? `/?${qs}` : "/";
+    }
+  } catch (_) {}
+  return "/";
 }
 
 export default function WatchPage() {
@@ -43,10 +63,25 @@ export default function WatchPage() {
       }
       try {
         const savedSource = typeof getSource === "function" ? getSource() : "";
+
+        // Lấy số trang & danh mục đang duyệt để gợi ý video cùng trang/danh mục đó
+        let currentCat = "all";
+        let currentPage = "1";
+        try {
+          const savedState = JSON.parse(
+            sessionStorage.getItem(STATE_STORAGE_KEY) || "{}"
+          );
+          if (savedState.category) currentCat = savedState.category;
+          if (savedState.page) currentPage = String(savedState.page);
+        } catch (_) {}
+
         const query = new URLSearchParams({ slug: cleanSlug });
         if (savedSource) query.set("domain", savedSource);
 
-        const listQuery = new URLSearchParams({ category: "all", page: "1" });
+        const listQuery = new URLSearchParams({
+          category: currentCat,
+          page: currentPage
+        });
         if (savedSource) listQuery.set("domain", savedSource);
 
         const [videoRes, listRes] = await Promise.all([
@@ -80,6 +115,11 @@ export default function WatchPage() {
     };
   }, [cleanSlug]);
 
+  const handleBackToList = () => {
+    const targetUrl = getBackListUrl();
+    router.push(targetUrl);
+  };
+
   const tags = Array.isArray(video?.tags) ? video.tags : [];
 
   return (
@@ -87,11 +127,11 @@ export default function WatchPage() {
       <div>
         <button
           type="button"
-          onClick={() => router.back()}
+          onClick={handleBackToList}
           className="inline-flex items-center gap-1.5 rounded-full bg-slate-800/70 hover:bg-slate-800 border border-slate-700/60 px-3.5 py-1.5 text-xs font-medium text-slate-300 hover:text-white mb-3.5 transition"
         >
           <span>←</span>
-          <span>Quay lại</span>
+          <span>Quay lại danh sách</span>
         </button>
 
         {loading ? (
@@ -116,7 +156,7 @@ export default function WatchPage() {
                   {tags.map((t) => (
                     <Link
                       key={t.slug}
-                      href={`/?category=${encodeURIComponent(t.slug)}`}
+                      href={`/?category=${encodeURIComponent(t.slug)}&page=1`}
                       className="px-2.5 py-1 rounded-full bg-slate-800/70 hover:bg-indigo-500 border border-slate-700/50 text-xs text-slate-300 hover:text-white transition"
                     >
                       #{t.name}
@@ -134,7 +174,7 @@ export default function WatchPage() {
           <div className="flex items-center gap-2">
             <span className="inline-block w-1.5 h-5 rounded-full bg-indigo-400" />
             <h2 className="text-base sm:text-lg font-semibold text-slate-100">
-              Video mới đề xuất
+              Video cùng trang đề xuất
             </h2>
           </div>
 
