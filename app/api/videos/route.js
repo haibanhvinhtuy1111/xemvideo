@@ -45,6 +45,46 @@ const IGNORE_DOMAINS = [
   "jquery.com"
 ];
 
+// Các host dùng WebSocket / WebRTC / Canvas bảo mật cao -> Bắt buộc phát Iframe trực tiếp (không qua embedProxy)
+const DIRECT_IFRAME_HOSTS = [
+  "hydrax",
+  "abyss",
+  "short.ink",
+  "helvid",
+  "dood",
+  "d000d",
+  "ds2play",
+  "ok.ru",
+  "odnoklassniki",
+  "streamtape",
+  "voe.sx",
+  "filemoon",
+  "streamwish",
+  "lulustream",
+  "vidoza",
+  "upstream",
+  "mixdrop",
+  "blogger.com",
+  "blogspot.com",
+  "youtube.com",
+  "youtu.be",
+  "vimeo.com",
+  "dailymotion.com",
+  "spankbang",
+  "xvideos",
+  "xnxx",
+  "pornhub"
+];
+
+// Các host khóa chặt Referer trang gốc -> Cần ưu tiên chạy qua embedProxy nếu chưa bóc được .m3u8
+const PROXY_PREFERRED_HOSTS = [
+  "cd-vs.com",
+  "vhstream",
+  "goostream",
+  "viet69",
+  "69vn"
+];
+
 const CATEGORY_MAP = {
   "phim-sex-viet-moi": {
     paths: [
@@ -167,7 +207,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
 }
 
 function is404Html(html = "") {
-  if (!html || html.length < 500) return true;
+  if (!html || html.length < 400) return true;
   if (/<title>[^<]*(?:404|Not Found|Page not found)/i.test(html)) return true;
   if (html.includes("404 Not Found") && !html.includes("loop-video")) {
     return true;
@@ -231,6 +271,7 @@ async function fetchHtmlWithFallback(targetUrl, headers, allowProxy = true) {
 function decodeBase64Safe(str = "") {
   try {
     const cleaned = String(str).trim().replace(/\s+/g, "");
+    if (!/^[A-Za-z0-9+/=_-]+$/.test(cleaned)) return "";
     const decoded = Buffer.from(cleaned, "base64").toString("utf-8").trim();
     if (decoded && !/[\x00-\x08\x0E-\x1F]/.test(decoded)) {
       return decoded;
@@ -355,7 +396,8 @@ function isStaticAsset(url = "") {
     clean.endsWith(".m3u8") ||
     clean.endsWith(".mp4") ||
     clean.endsWith(".webm") ||
-    clean.endsWith(".mov")
+    clean.endsWith(".mov") ||
+    clean.endsWith(".mkv")
   ) {
     return false;
   }
@@ -387,22 +429,39 @@ function normalizeUrl(raw = "", baseDomain = "") {
   return u;
 }
 
+// Kiểm tra xem host iframe có bắt buộc chạy trực tiếp (không qua embedProxy) hay không
+function shouldUseDirectIframe(url = "") {
+  const lower = url.toLowerCase();
+  if (DIRECT_IFRAME_HOSTS.some((h) => lower.includes(h))) return true;
+  if (PROXY_PREFERRED_HOSTS.some((h) => lower.includes(h))) return false;
+  // Mặc định với các host lạ bên thứ 3: ưu tiên chạy trực tiếp trước, kèm bản Proxy dự phòng
+  return true;
+}
+
+// 1. Quét toàn bộ cấu trúc nút bấm Server (cả bài mới lẫn bài cũ)
 function extractViet69Servers(html = "") {
   const servers = [];
   const seen = new Set();
 
+  // 1a. Nút .video2-btn hoặc .server-btn
   const btnRegex =
-    /<button[^>]*class=["']?[^"'>]*video2-btn[^"'>]*["']?[^>]*>([\s\S]*?)<\/button>/gi;
+    /<(?:button|a|li|span)[^>]*class=["']?[^"'>]*(?:video2-btn|server-btn|btn-server|play-btn)[^"'>]*["']?[^>]*>([\s\S]*?)<\/(?:button|a|li|span)>/gi;
   let m;
+  let btnIdx = 1;
   while ((m = btnRegex.exec(html)) !== null) {
     const tag = m[0];
-    const label = cleanText(m[1]) || `Server #${servers.length + 1}`;
+    const label = cleanText(m[1]) || `Server #${btnIdx}`;
     const typeMatch = tag.match(/\bdata-type=(?:["']([^"']+)["']|([^\s>"']+))/i);
+    const indexMatch = tag.match(
+      /\bdata-index=(?:["']([^"']+)["']|([^\s>"']+))/i
+    );
     const videoMatch = tag.match(
-      /\bdata-(?:video|movie)=(?:["']([^"']+)["']|([^\s>"']+))/i
+      /\bdata-(?:video|movie|src|link|url|embed|hash|id)=(?:["']([^"']+)["']|([^\s>"']+))/i
     );
     const rawVid = videoMatch ? videoMatch[1] || videoMatch[2] : "";
     const rawType = typeMatch ? typeMatch[1] || typeMatch[2] : "1";
+    const rawIndex = indexMatch ? indexMatch[1] || indexMatch[2] : "1";
+
     if (rawVid) {
       const movieId = rawVid.trim();
       const dataType = rawType.trim();
@@ -413,15 +472,17 @@ function extractViet69Servers(html = "") {
           label,
           movieId,
           dataType,
-          index: 1
+          index: parseInt(rawIndex, 10) || 1
         });
       }
+      btnIdx++;
     }
   }
 
+  // 1b. Khung .movieLoader
   const loaderRegex =
     /<div[^>]*class=["']?[^"'>]*movieLoader\b[^"'>]*["']?[^>]*>/gi;
-  let idx = 1;
+  let loaderIdx = 1;
   while ((m = loaderRegex.exec(html)) !== null) {
     const tag = m[0];
     if (tag.includes("movieLoader-server")) continue;
@@ -441,47 +502,17 @@ function extractViet69Servers(html = "") {
           label: `Server #${servers.length + 1}`,
           movieId,
           dataType,
-          index: idx
+          index: loaderIdx
         });
       }
-      idx++;
+      loaderIdx++;
     }
   }
 
   return servers;
 }
 
-// Bóc tách luồng video trực tiếp trong bài viết (dành cho bài đăng thành viên bai-viet/... không dùng nút video2-btn)
-function extractDirectPostMedia(pageHtml = "", baseDomain = "", baseHost = "") {
-  if (!pageHtml) return [];
-
-  // Khoanh vùng phần thân bài viết để không bắt nhầm quảng cáo ở footer/sidebar
-  const contentMatch =
-    pageHtml.match(
-      /<(?:article|div)[^>]*class=["']?[^"'>]*(?:entry-content|post-content|single-content|video-player|player-wrapper|content-area)[^"'>]*["']?[^>]*>[\s\S]*?<\/(?:article|div)>/i
-    ) || pageHtml.match(/<article[\s\S]*?<\/article>/i);
-
-  const scopeHtml = contentMatch ? contentMatch[0] : pageHtml;
-  const rawItems = parsePlayerHtml(scopeHtml, baseDomain);
-
-  return rawItems.filter((item) => {
-    try {
-      const u = new URL(item.url);
-      const h = u.hostname.replace(/^www\./, "").toLowerCase();
-      if (item.type === "hls" || item.type === "mp4") return true;
-      // Nếu là iframe, không lấy nhầm trang bài viết thông thường của viet69
-      if (h === baseHost || h.includes("viet69")) {
-        return /(?:embed|player|play|video|stream|get\.)/i.test(
-          u.pathname + u.search
-        );
-      }
-      return true;
-    } catch (_) {
-      return false;
-    }
-  });
-}
-
+// 2. Bóc tách luồng phát trực tiếp từ mã HTML/JS (hỗ trợ cả video rất cũ dùng JWPlayer, VideoJS, <textarea> ẩn)
 function parsePlayerHtml(rawHtml = "", baseDomain = "") {
   if (!rawHtml) return [];
   let buffer = String(rawHtml)
@@ -490,12 +521,20 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
       String.fromCharCode(parseInt(hex, 16))
     )
     .replace(/\\u0026/gi, "&")
+    .replace(/\\u003c/gi, "<")
+    .replace(/\\u003e/gi, ">")
+    .replace(/\\u0022/gi, '"')
+    .replace(/\\u0027/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
     .replace(/&amp;/g, "&")
     .trim();
 
   buffer += "\n" + unpackPacker(buffer);
 
-  const b64Regex = /([A-Za-z0-9+/]{24,}={0,2})/g;
+  // Giải mã mọi chuỗi Base64 có trong văn bản
+  const b64Regex = /([A-Za-z0-9+/]{20,}={0,2})/g;
   let bm;
   while ((bm = b64Regex.exec(buffer)) !== null) {
     const decoded = decodeBase64Safe(bm[1]);
@@ -520,7 +559,9 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
     const isMp4 =
       lower.includes(".mp4") ||
       lower.includes(".webm") ||
-      lower.includes(".mov");
+      lower.includes(".mov") ||
+      lower.includes(".mkv") ||
+      lower.includes("googlevideo.com/videoplayback");
     const type =
       forcedType || (isHls ? "hls" : isMp4 ? "mp4" : "iframe");
     results.push({ url: u, type });
@@ -531,12 +572,16 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
     return results;
   }
 
+  // Quét các thẻ <iframe>, <video>, <source>, <embed>, <object>
   const tagRegex = /<(iframe|video|source|embed|object)\b[^>]*>/gi;
   const attrs = [
     "data-litespeed-src",
     "data-lazy-src",
+    "data-wpfc-original-src",
     "data-src",
     "data-url",
+    "data-video",
+    "data-embed",
     "src",
     "data"
   ];
@@ -564,28 +609,33 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
     }
   }
 
+  // Quét biến cấu hình JWPlayer / Plyr / VideoJS / Flowplayer trong các bài cũ
   const jsFieldRegex =
-    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|video_url|videoSource|securedLink|stream_url|hls|mp4|link)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+|\/[^"'\s<>]+)["']/gi;
+    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|contentUrl|video_url|videoUrl|videoSource|securedLink|stream_url|hls|mp4|link|clip)["']?)\s*[:=]\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+|\/[^"'\s<>]+)["']/gi;
   while ((m = jsFieldRegex.exec(buffer)) !== null) {
     const fieldCall = m[0].toLowerCase();
+    const rawVal = m[1];
+    if (
+      /\.(?:jpg|jpeg|png|webp|gif|vtt|srt|ass|css|js)(?:\?|$)/i.test(rawVal)
+    ) {
+      continue;
+    }
     const isHlsField =
       fieldCall.includes("videosource") ||
       fieldCall.includes("securedlink") ||
       fieldCall.includes("hls") ||
-      fieldCall.includes("file") ||
-      fieldCall.includes("source");
-    addUrl(
-      m[1],
-      m[1].includes(".mp4") ? "mp4" : isHlsField ? "hls" : ""
-    );
+      rawVal.includes(".m3u8");
+    const isMp4Field = fieldCall.includes("mp4") || rawVal.includes(".mp4");
+    addUrl(rawVal, isMp4Field ? "mp4" : isHlsField ? "hls" : "");
   }
 
   const loadSourceRegex =
-    /loadSource\s*\(\s*["'`](https?:\/\/[^"'`\s]+|\/[^"'`\s]+)["'`]\s*\)/gi;
+    /(?:loadSource|setSrc|src)\s*\(\s*["'`](https?:\/\/[^"'`\s]+|\/[^"'`\s]+)["'`]\s*\)/gi;
   while ((m = loadSourceRegex.exec(buffer)) !== null) {
-    addUrl(m[1], "hls");
+    addUrl(m[1], m[1].includes(".mp4") ? "mp4" : "hls");
   }
 
+  // Quét trực tiếp mọi link .m3u8 và .mp4 trong văn bản
   (
     buffer.match(
       /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\]*)?/gi
@@ -595,10 +645,57 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
   return results;
 }
 
+// Quét chuyên sâu cho các bài viết cũ hoặc bài đăng thành viên không dùng .video2-btn
+function extractLegacyAndDirectMedia(
+  pageHtml = "",
+  baseDomain = "",
+  baseHost = ""
+) {
+  if (!pageHtml) return [];
+
+  // Tách khu vực nội dung bài viết & vùng player để tránh bắt nhầm quảng cáo ở footer
+  const zones = [];
+  const zoneRegex =
+    /<(?:article|div|section)[^>]*class=["']?[^"'>]*(?:responsive-player|video-player|player-wrapper|entry-content|post-content|single-content|toro-play|video-embed|sv2-player)[^"'>]*["']?[^>]*>[\s\S]{0,25000}?<\/(?:article|div|section)>/gi;
+  let zm;
+  while ((zm = zoneRegex.exec(pageHtml)) !== null) {
+    zones.push(zm[0]);
+  }
+
+  // Quét thêm thẻ <meta property="og:video"> hoặc embedUrl trong JSON-LD (rất phổ biến ở bài cũ)
+  const metaRegex =
+    /<meta[^>]+(?:property|name|itemprop)=["']?(?:og:video(?::url|:secure_url)?|twitter:player|embedUrl|contentUrl)["']?[^>]+content=["']([^"']+)["']/gi;
+  let mm;
+  while ((mm = metaRegex.exec(pageHtml)) !== null) {
+    zones.push(`<iframe src="${mm[1]}"></iframe>`);
+  }
+
+  const scopeHtml = zones.length > 0 ? zones.join("\n") : pageHtml;
+  const rawItems = parsePlayerHtml(scopeHtml, baseDomain);
+
+  return rawItems.filter((item) => {
+    try {
+      const u = new URL(item.url);
+      const h = u.hostname.replace(/^www\./, "").toLowerCase();
+      if (item.type === "hls" || item.type === "mp4") return true;
+      if (h === baseHost || h.includes("viet69")) {
+        return /(?:embed|player|play|video|stream|get\.)/i.test(
+          u.pathname + u.search
+        );
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  });
+}
+
+// Đi xuyên vào trang Iframe (emb.cd-vs.com / FirePlayer / JWPlayer) để kiểm tra tình trạng sống/chết và lấy link .m3u8
 async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
   const directStreams = [];
   let embedSnippet = "";
   let embedCookies = "";
+  let isAlive = true;
 
   try {
     const embedUrlObj = new URL(iframeUrl);
@@ -612,8 +709,17 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
           Referer: postLink
         }
       },
-      6000
+      5500
     );
+
+    if (res.status === 404 || res.status === 410 || res.status >= 500) {
+      return {
+        directStreams: [],
+        embedSnippet: `DeadStatus: ${res.status}`,
+        embedCookies: "",
+        isAlive: false
+      };
+    }
 
     const setCookie = res.headers.get("set-cookie");
     if (setCookie) {
@@ -625,6 +731,16 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
 
     const html = await res.text();
 
+    // Kiểm tra xem video trên server nhúng đã bị xóa / hết hạn chưa
+    if (
+      html.length < 250 ||
+      /(?:Video not found|File was deleted|File is no longer available|404 Not Found|We're sorry, this video|Video đã bị xóa|Không tìm thấy video)/i.test(
+        html
+      )
+    ) {
+      isAlive = false;
+    }
+
     const inlineScripts = [];
     const scriptRegex = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
     let sm;
@@ -632,8 +748,7 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
       const attrs = sm[1] || "";
       const body = (sm[2] || "").trim();
       if (body) {
-        const decodedBody = deobfuscateScriptWithVm(body);
-        inlineScripts.push(decodedBody);
+        inlineScripts.push(deobfuscateScriptWithVm(body));
       } else {
         const srcM = attrs.match(/src=["']([^"']+)["']/i);
         if (
@@ -649,7 +764,7 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
             const extRes = await fetchWithTimeout(
               extUrl,
               { headers: { ...BROWSER_HEADERS, Referer: iframeUrl } },
-              4000
+              3500
             );
             if (extRes.ok) {
               const extJs = await extRes.text();
@@ -662,14 +777,15 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
 
     const combinedScripts = inlineScripts.join("\n");
     if (combinedScripts) {
-      embedSnippet = combinedScripts.replace(/\s+/g, " ").slice(0, 900);
+      embedSnippet = combinedScripts.replace(/\s+/g, " ").slice(0, 700);
     } else {
       const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
       embedSnippet = (bodyMatch ? bodyMatch[1] : html)
         .replace(/\s+/g, " ")
-        .slice(0, 700);
+        .slice(0, 500);
     }
 
+    // 1. Quét tìm link .m3u8 / .mp4 trong script đã giải mã
     const parsedInner = parsePlayerHtml(
       html + "\n" + combinedScripts,
       embedOrigin
@@ -684,6 +800,7 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
       }
     }
 
+    // 2. Gọi thử các endpoint AJAX bên trong trang nhúng (nếu có)
     const ajaxUrlRegex =
       /(?:url\s*:\s*|\$\.(?:post|get|getJSON)\s*\(\s*|fetch\s*\(\s*)["'`]([^"'`\s]+)["'`]/gi;
     let am;
@@ -716,15 +833,15 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
               },
               ...(method === "POST"
                 ? {
-                    body: `id=${encodeURIComponent(uuid)}&vid=${encodeURIComponent(uuid)}&r=${encodeURIComponent(baseDomain + "/")}`
+                    body: `id=${encodeURIComponent(uuid)}&vid=${encodeURIComponent(uuid)}&hash=${encodeURIComponent(uuid)}&r=${encodeURIComponent(baseDomain + "/")}`
                   }
                 : {})
             },
-            4500
+            4000
           );
           if (ajaxRes.ok) {
             const ajaxText = await ajaxRes.text();
-            embedSnippet += ` | Ajax(${rawAjaxPath}): ${ajaxText.slice(0, 250)}`;
+            embedSnippet += ` | Ajax(${rawAjaxPath}): ${ajaxText.slice(0, 200)}`;
             const extracted = parsePlayerHtml(ajaxText, embedOrigin);
             for (const ex of extracted) {
               if (ex.type === "hls" || ex.type === "mp4") {
@@ -743,9 +860,10 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
     embedSnippet = `HopError: ${err.message}`;
   }
 
-  return { directStreams, embedSnippet, embedCookies };
+  return { directStreams, embedSnippet, embedCookies, isAlive };
 }
 
+// Giải mã từng nút Server: Gọi /get.video.php + Fallback giải mã trực tiếp Base64/UUID khi /get.video.php lỗi
 async function fetchViet69PlayerUrl({
   baseDomain,
   postLink,
@@ -753,10 +871,9 @@ async function fetchViet69PlayerUrl({
   reqHeaders,
   cookies
 }) {
-  const endpoint =
-    String(srv.dataType) === "10" ? "/get.xvideo.php" : "/get.video.php";
-  const targetUrl = `${baseDomain}${endpoint}`;
-  const body = `movie_id=${srv.movieId}&type=${srv.dataType}&index=${srv.index || 1}`;
+  const isType10 = String(srv.dataType) === "10";
+  const primaryEndpoint = isType10 ? "/get.xvideo.php" : "/get.video.php";
+  const backupEndpoint = isType10 ? "/get.video.php" : "/get.xvideo.php";
 
   const ajaxHeaders = {
     ...reqHeaders,
@@ -767,73 +884,112 @@ async function fetchViet69PlayerUrl({
     ...(cookies ? { Cookie: cookies } : {})
   };
 
-  try {
-    const res = await fetchWithTimeout(
-      targetUrl,
-      {
-        method: "POST",
-        headers: ajaxHeaders,
-        body
-      },
-      6000
-    );
+  let parsed = [];
+  let rawText = "";
 
-    const text = await res.text();
-    let parsed = parsePlayerHtml(text, baseDomain);
-
-    if (parsed.length === 0) {
-      const getRes = await fetchWithTimeout(
-        `${targetUrl}?${body}`,
-        { method: "GET", headers: ajaxHeaders },
+  // 1. Thử gọi POST tới endpoint chính (thử cả index của nút và index=1)
+  const indicesToTry = [...new Set([srv.index || 1, 1, 2])];
+  for (const idxVal of indicesToTry) {
+    if (parsed.length > 0) break;
+    const body = `movie_id=${encodeURIComponent(srv.movieId)}&type=${encodeURIComponent(srv.dataType)}&index=${idxVal}`;
+    try {
+      const res = await fetchWithTimeout(
+        `${baseDomain}${primaryEndpoint}`,
+        { method: "POST", headers: ajaxHeaders, body },
         5000
       );
-      const getText = await getRes.text();
-      parsed = parsePlayerHtml(getText, baseDomain);
-    }
-
-    const enrichedItems = [];
-    let hopLog = "";
-
-    for (const item of parsed) {
-      if (item.type === "iframe") {
-        const { directStreams, embedSnippet, embedCookies } =
-          await resolveEmbedPage(item.url, postLink, baseDomain);
-        if (embedSnippet) hopLog += `\n -> [Body]: ${embedSnippet}`;
-
-        for (const ds of directStreams) {
-          enrichedItems.push({
-            url: ds.url,
-            type: ds.type,
-            referer: ds.referer || item.url,
-            embedCookies,
-            isDirectResolved: true
-          });
+      if (res.ok) {
+        const t = await res.text();
+        if (t && t.trim()) {
+          rawText = t;
+          parsed = parsePlayerHtml(t, baseDomain);
         }
-        enrichedItems.push({
-          url: item.url,
-          type: "iframe",
-          referer: postLink,
-          embedCookies,
-          isDirectResolved: false
-        });
-      } else {
-        enrichedItems.push({
-          url: item.url,
-          type: item.type,
-          referer: postLink,
-          embedCookies: "",
-          isDirectResolved: true
-        });
+      }
+    } catch (_) {}
+  }
+
+  // 2. Nếu vẫn rỗng, thử sang endpoint dự phòng (/get.xvideo.php <-> /get.video.php)
+  if (parsed.length === 0) {
+    const body = `movie_id=${encodeURIComponent(srv.movieId)}&type=${encodeURIComponent(srv.dataType)}&index=1`;
+    try {
+      const res = await fetchWithTimeout(
+        `${baseDomain}${backupEndpoint}`,
+        { method: "POST", headers: ajaxHeaders, body },
+        4500
+      );
+      if (res.ok) {
+        const t = await res.text();
+        if (t && t.trim()) {
+          rawText = t;
+          parsed = parsePlayerHtml(t, baseDomain);
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 3. Fallback trực tiếp từ chuỗi data-video (cứu cánh khi /get.video.php chết ở bài cũ hoặc chặn IP)
+  if (parsed.length === 0 && srv.movieId) {
+    const decoded = decodeBase64Safe(srv.movieId) || srv.movieId;
+    if (/^https?:\/\//i.test(decoded) || decoded.includes("<iframe")) {
+      parsed = parsePlayerHtml(decoded, baseDomain);
+    } else if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        decoded
+      )
+    ) {
+      // Nếu giải mã ra UUID chuẩn -> dựng thẳng link emb.cd-vs.com
+      parsed = [{ url: `https://emb.cd-vs.com/embed/${decoded}`, type: "iframe" }];
+    } else if (/^[a-zA-Z0-9_-]{7,16}$/.test(decoded)) {
+      // Mã ngắn của Hydrax / Short.ink / Helvid
+      if (String(srv.dataType) === "2" || String(srv.dataType) === "15") {
+        parsed = [{ url: `https://short.ink/${decoded}`, type: "iframe" }];
       }
     }
-
-    return {
-      items: enrichedItems,
-      rawResponse: `${text.trim()}${hopLog}`
-    };
-  } catch (err) {
-    return { items: [], rawResponse: `Error: ${err.message}` };
   }
+
+  const enrichedItems = [];
+  let hopLog = "";
+
+  for (const item of parsed) {
+    if (item.type === "iframe") {
+      const { directStreams, embedSnippet, embedCookies, isAlive } =
+        await resolveEmbedPage(item.url, postLink, baseDomain);
+      if (embedSnippet) hopLog += `\n -> [Body]: ${embedSnippet}`;
+
+      for (const ds of directStreams) {
+        enrichedItems.push({
+          url: ds.url,
+          type: ds.type,
+          referer: ds.referer || item.url,
+          embedCookies,
+          isDirectResolved: true,
+          isAlive: true
+        });
+      }
+      enrichedItems.push({
+        url: item.url,
+        type: "iframe",
+        referer: postLink,
+        embedCookies,
+        isDirectResolved: false,
+        isAlive
+      });
+    } else {
+      enrichedItems.push({
+        url: item.url,
+        type: item.type,
+        referer: postLink,
+        embedCookies: "",
+        isDirectResolved: true,
+        isAlive: true
+      });
+    }
+  }
+
+  return {
+    items: enrichedItems,
+    rawResponse: `${rawText.trim()}${hopLog}`
+  };
 }
 
 function extractTotalPagesFromHtml(html = "", currentPage = 1) {
@@ -1174,7 +1330,6 @@ async function handleRawProxy(req) {
       finalTargetUrl.includes("master") ||
       (contentLength > 0 && contentLength < 250000);
 
-    // Nếu là phân đoạn video lớn (.ts / .mp4), truyền luồng trực tiếp (streaming) để phát mượt không nghẽn bộ nhớ
     if (!mightBeM3u8 && upstream.body) {
       const streamHeaders = {
         ...CORS,
@@ -1262,6 +1417,21 @@ async function handleRawProxy(req) {
   }
 }
 
+// Biến đổi nhẹ nhàng các lệnh kiểm tra location trong JS mà KHÔNG dùng `with(...)` để không làm gãy biến toàn cục
+function transformEmbedJsCode(js = "") {
+  if (!js || !js.trim()) return js;
+  return js
+    .replace(/\bwindow\.location\b/g, "window.__fakeLoc")
+    .replace(/\bdocument\.location\b/g, "window.__fakeLoc")
+    .replace(/\bself\.location\b/g, "window.__fakeLoc")
+    .replace(/\btop\.location\b/g, "window.__fakeTopLoc")
+    .replace(/\bparent\.location\b/g, "window.__fakeTopLoc")
+    .replace(
+      /\blocation\.(href|hostname|host|origin|pathname|search|assign|replace|reload)\b/g,
+      "window.__fakeLoc.$1"
+    );
+}
+
 export async function POST(req) {
   const sp = req.nextUrl.searchParams;
   if (sp.get("rawProxy") === "1" || sp.get("hlsProxy") === "1") {
@@ -1281,7 +1451,7 @@ export async function GET(req) {
     return handleRawProxy(req);
   }
 
-  // CHẾ ĐỘ A2: PROXY FILE SCRIPT CỦA TRANG NHÚNG (BỌC TRONG SANDBOX CHỐNG REDIRECT 404)
+  // CHẾ ĐỘ A2: PROXY FILE SCRIPT CỦA TRANG NHÚNG
   if (sp.get("scriptProxy") === "1") {
     const targetUrl = sp.get("url");
     const referer = sp.get("referer") || `${DEFAULT_DOMAIN}/`;
@@ -1297,10 +1467,8 @@ export async function GET(req) {
         { headers: { ...BROWSER_HEADERS, Referer: referer } },
         7000
       );
-      let js = await res.text();
-      js = js.replace(/["']use strict["']\s*;?/g, "");
-      const wrapped = `\nif (window.__sandboxScope) {\n  with (window.__sandboxScope) {\n${js}\n  }\n} else {\n${js}\n}\n`;
-      return new NextResponse(wrapped, {
+      const js = await res.text();
+      return new NextResponse(transformEmbedJsCode(js), {
         status: 200,
         headers: {
           ...CORS,
@@ -1316,7 +1484,7 @@ export async function GET(req) {
     }
   }
 
-  // CHẾ ĐỘ B: PROXY TRANG NHÚNG IFRAME (CHẶN ĐỨNG CHUYỂN HƯỚNG 404 & GIẢ LẬP DOMAIN)
+  // CHẾ ĐỘ B: PROXY TRANG NHÚNG IFRAME (CHUYÊN DỤNG CHO EMB.CD-VS.COM & PLAYER KHÓA DOMAIN)
   if (sp.get("embedProxy") === "1") {
     const targetUrl = sp.get("url");
     const referer = sp.get("referer") || `${DEFAULT_DOMAIN}/`;
@@ -1357,10 +1525,8 @@ export async function GET(req) {
         refUrlObj = new URL(DEFAULT_DOMAIN);
       }
 
-      // Xóa mọi thẻ <meta http-equiv="refresh"> nếu có
       html = html.replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, "");
 
-      // Bọc tất cả các thẻ <script> nội tuyến trong `with (window.__sandboxScope)` để khóa mọi lệnh redirect location
       html = html.replace(
         /<script\b([^>]*)>([\s\S]*?)<\/script>/gi,
         (fullTag, attrs, body) => {
@@ -1370,7 +1536,7 @@ export async function GET(req) {
           if (srcMatch) {
             const rawSrc = srcMatch[1] || srcMatch[2] || "";
             if (
-              /googleapis\.com|cloudflare\.com|jsdelivr\.net|jquery|plyr|hls\.js|hls\.min\.js/i.test(
+              /googleapis\.com|cloudflare\.com|jsdelivr\.net|jquery|plyr|hls\.js|hls\.min\.js|jwplayer/i.test(
                 rawSrc
               )
             ) {
@@ -1384,13 +1550,11 @@ export async function GET(req) {
               return fullTag;
             }
           }
-          const cleanBody = body.replace(/["']use strict["']\s*;?/g, "");
-          if (!cleanBody.trim()) return fullTag;
-          return `<script${attrs}>\nif (window.__sandboxScope) {\n  with (window.__sandboxScope) {\n${cleanBody}\n  }\n}\n</script>`;
+          if (!body.trim()) return fullTag;
+          return `<script${attrs}>\n${transformEmbedJsCode(body)}\n</script>`;
         }
       );
 
-      // Chuyển các đường dẫn tài nguyên tĩnh tương đối (/...) sang rawProxy
       html = html.replace(
         /\b(src|href)=["'](\/(?!\/|api\/videos)[^"']+)["']/gi,
         (_, attr, relPath) => {
@@ -1399,7 +1563,6 @@ export async function GET(req) {
         }
       );
 
-      // Tiêm môi trường ảo hóa __sandboxScope (KHÔNG dùng history.replaceState làm hỏng URL thật)
       const interceptorScript = `
         <style>html,body{margin:0!important;padding:0!important;width:100%!important;height:100%!important;overflow:hidden!important;background:#000!important;}</style>
         <script>
@@ -1451,10 +1614,8 @@ export async function GET(req) {
                 (COOKIE_STR ? "&cookie=" + encodeURIComponent(COOKIE_STR) : "")
               );
             }
-            window.__rewriteToProxy = rewriteToProxy;
 
-            // 1. Ảo hóa Location của trang nhúng (emb.cd-vs.com) và chặn mọi lệnh redirect sang 404
-            var fakeLoc = {
+            window.__fakeLoc = {
               get href() { return TARGET_URL; },
               set href(v) {},
               get origin() { return TARGET_ORIGIN; },
@@ -1471,8 +1632,7 @@ export async function GET(req) {
               toString: function() { return TARGET_URL; }
             };
 
-            // 2. Ảo hóa Location của trang cha (viet69.be)
-            var fakeTopLoc = {
+            window.__fakeTopLoc = {
               get href() { return REF_URL; },
               set href(v) {},
               get origin() { return REF_ORIGIN; },
@@ -1484,14 +1644,6 @@ export async function GET(req) {
               replace: function() {},
               reload: function() {},
               toString: function() { return REF_URL; }
-            };
-
-            var fakeHist = {
-              pushState: function() {},
-              replaceState: function() {},
-              go: function() {},
-              back: function() {},
-              forward: function() {}
             };
 
             try {
@@ -1506,95 +1658,12 @@ export async function GET(req) {
               });
             } catch (e) {}
 
-            var fakeDoc = new Proxy(document, {
-              get: function(target, prop) {
-                if (prop === "location") return fakeLoc;
-                if (prop === "referrer") return REF_URL;
-                if (prop === "domain") return TARGET_HOSTNAME;
-                if (prop === "URL" || prop === "documentURI") return TARGET_URL;
-                var val = target[prop];
-                return typeof val === "function" ? val.bind(target) : val;
-              },
-              set: function(target, prop, value) {
-                if (prop === "location" || prop === "domain") return true;
-                target[prop] = value;
-                return true;
-              }
-            });
-
-            var fakeTop = null;
-            var fakeWin = new Proxy(window, {
-              get: function(target, prop) {
-                if (prop === "location") return fakeLoc;
-                if (prop === "document") return fakeDoc;
-                if (prop === "history") return fakeHist;
-                if (prop === "window" || prop === "self" || prop === "globalThis") return fakeWin;
-                if (prop === "top" || prop === "parent") return fakeTop;
-                if (prop === "origin") return TARGET_ORIGIN;
-                var val = target[prop];
-                return typeof val === "function" ? val.bind(target) : val;
-              },
-              set: function(target, prop, value) {
-                if (prop === "location") return true;
-                target[prop] = value;
-                return true;
-              }
-            });
-
-            fakeTop = new Proxy(window, {
-              get: function(target, prop) {
-                if (prop === "location") return fakeTopLoc;
-                if (prop === "window" || prop === "self" || prop === "top" || prop === "parent") return fakeTop;
-                var val = target[prop];
-                return typeof val === "function" ? val.bind(target) : val;
-              },
-              set: function(target, prop, value) {
-                if (prop === "location") return true;
-                return true;
-              }
-            });
-
-            window.__fakeLoc = fakeLoc;
-            window.__fakeTopLoc = fakeTopLoc;
-            window.__fakeDoc = fakeDoc;
-            window.__fakeWin = fakeWin;
-            window.__fakeTop = fakeTop;
-            window.__fakeHist = fakeHist;
-
-            window.__sandboxScope = {
-              get window() { return fakeWin; },
-              set window(v) {},
-              get self() { return fakeWin; },
-              set self(v) {},
-              get top() { return fakeTop; },
-              set top(v) {},
-              get parent() { return fakeTop; },
-              set parent(v) {},
-              get globalThis() { return fakeWin; },
-              set globalThis(v) {},
-              get document() { return fakeDoc; },
-              set document(v) {},
-              get location() { return fakeLoc; },
-              set location(v) {},
-              get history() { return fakeHist; },
-              set history(v) {}
-            };
-
-            // 3. Chặn tạo thẻ <a> ẩn để click chuyển hướng
             try {
               HTMLAnchorElement.prototype.click = function() {};
               HTMLFormElement.prototype.submit = function() {};
               window.open = function() { return null; };
-              window.addEventListener("click", function(e) {
-                var a = e.target && e.target.closest ? e.target.closest("a") : null;
-                if (a) {
-                  e.preventDefault();
-                  e.stopPropagation();
-                }
-              }, true);
             } catch (e) {}
 
-            // 4. Bắt mọi request XHR & Fetch qua Proxy
             var origOpen = XMLHttpRequest.prototype.open;
             XMLHttpRequest.prototype.open = function(method, url) {
               var args = Array.prototype.slice.call(arguments);
@@ -1614,7 +1683,6 @@ export async function GET(req) {
               };
             }
 
-            // 5. Ép Hls.js chạy trên luồng chính (enableWorker: false) để không bị rớt kết nối sau vài giây
             var _OrigHls = window.Hls;
             function wrapHlsClass(HlsClass) {
               if (typeof HlsClass !== "function" || HlsClass.__wrapped) return HlsClass;
@@ -1710,7 +1778,7 @@ export async function GET(req) {
   const reqHeaders = { ...BROWSER_HEADERS, Referer: `${baseDomain}/` };
 
   // =================================================================
-  // TRƯỜNG HỢP 1: LẤY CHI TIẾT VIDEO THEO SLUG (KỂ CẢ bai-viet/...)
+  // TRƯỜNG HỢP 1: LẤY CHI TIẾT VIDEO THEO SLUG (TỐI ƯU MỌI SERVER & VIDEO CŨ/MỚI)
   // =================================================================
   if (rawSlugParam) {
     const cleanSlug = decodeSlug(rawSlugParam);
@@ -1724,18 +1792,96 @@ export async function GET(req) {
     try {
       let title = cleanSlug;
       let thumbnail = "";
-      const postLink = `${baseDomain}/${cleanSlug}/`;
+      let postLink = `${baseDomain}/${cleanSlug}/`;
       const allStreams = [];
       const allIframes = [];
       const customSources = [];
       const tags = [];
       const debugInfo = { baseDomain, wpStatus: 0, htmlVia: "none" };
 
-      const { html: pageHtml, via, status: htmlStatus, cookies } =
-        await fetchHtmlWithFallback(postLink, reqHeaders, true);
+      // 1. Thử tải bài viết theo đường dẫn chuẩn; nếu 404 ở bài cũ/bài thành viên thì tự động thử thêm tiền tố /bai-viet/
+      let fetchResult = await fetchHtmlWithFallback(postLink, reqHeaders, true);
+      if (
+        !fetchResult.html &&
+        !cleanSlug.startsWith("bai-viet/") &&
+        !cleanSlug.includes("/")
+      ) {
+        const altLink = `${baseDomain}/bai-viet/${cleanSlug}/`;
+        const altRes = await fetchHtmlWithFallback(altLink, reqHeaders, false);
+        if (altRes.html) {
+          fetchResult = altRes;
+          postLink = altLink;
+        }
+      }
+
+      const { html: pageHtml, via, status: htmlStatus, cookies } = fetchResult;
       debugInfo.htmlVia = via;
       debugInfo.htmlStatus = htmlStatus;
       debugInfo.htmlLength = pageHtml.length;
+
+      // Helper đóng gói nguồn phát thông minh theo từng loại Host
+      const registerMediaSource = (mediaItem, baseLabel) => {
+        const isAlive = mediaItem.isAlive !== false;
+        if (mediaItem.type === "hls" || mediaItem.type === "mp4") {
+          allStreams.push(mediaItem.url);
+          const proxyStreamUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaItem.url)}&referer=${encodeURIComponent(mediaItem.referer || postLink)}`;
+          customSources.push({
+            label: `${baseLabel} (VIP)`,
+            name: `${baseLabel} (VIP)`,
+            url: proxyStreamUrl,
+            src: proxyStreamUrl,
+            rawUrl: mediaItem.url,
+            proxyUrl: proxyStreamUrl,
+            type: mediaItem.type,
+            priority: isAlive ? 1 : 9
+          });
+          return;
+        }
+
+        allIframes.push(mediaItem.url);
+        const proxyEmbedUrl = `/api/videos?embedProxy=1&url=${encodeURIComponent(mediaItem.url)}&referer=${encodeURIComponent(postLink)}`;
+        const preferDirect = shouldUseDirectIframe(mediaItem.url);
+
+        if (preferDirect) {
+          // Với Hydrax / Abyss / Helvid / Dood / Ok.ru: Ưu tiên phát Iframe trực tiếp để không đứt WebSocket
+          customSources.push({
+            label: baseLabel,
+            name: baseLabel,
+            url: mediaItem.url,
+            src: mediaItem.url,
+            backupUrl: proxyEmbedUrl,
+            type: "iframe",
+            priority: isAlive ? 2 : 8
+          });
+          customSources.push({
+            label: `${baseLabel} (Proxy)`,
+            name: `${baseLabel} (Proxy)`,
+            url: proxyEmbedUrl,
+            src: proxyEmbedUrl,
+            type: "iframe",
+            priority: isAlive ? 4 : 9
+          });
+        } else {
+          // Với emb.cd-vs.com: Ưu tiên chạy qua Embed Proxy giả lập domain viet69
+          customSources.push({
+            label: baseLabel,
+            name: baseLabel,
+            url: proxyEmbedUrl,
+            src: proxyEmbedUrl,
+            backupUrl: mediaItem.url,
+            type: "iframe",
+            priority: isAlive ? 2 : 8
+          });
+          customSources.push({
+            label: `${baseLabel} (Gốc)`,
+            name: `${baseLabel} (Gốc)`,
+            url: mediaItem.url,
+            src: mediaItem.url,
+            type: "iframe",
+            priority: isAlive ? 5 : 9
+          });
+        }
+      };
 
       if (pageHtml) {
         const titleMatch =
@@ -1762,7 +1908,7 @@ export async function GET(req) {
           }
         }
 
-        // 1. Kiểm tra các nút Server (.video2-btn / .movieLoader)
+        // BƯỚC 1: Giải mã toàn bộ các nút Server (.video2-btn / .movieLoader)
         const servers = extractViet69Servers(pageHtml);
         debugInfo.servers = servers;
 
@@ -1785,38 +1931,8 @@ export async function GET(req) {
             if (res.rawResponse) {
               rawSnippets.push(`[${srv.label}]: ${res.rawResponse}`);
             }
-
             for (const mediaItem of res.items) {
-              if (mediaItem.type === "hls" || mediaItem.type === "mp4") {
-                allStreams.push(mediaItem.url);
-                const proxyStreamUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaItem.url)}&referer=${encodeURIComponent(mediaItem.referer || postLink)}`;
-                customSources.push({
-                  label: `${srv.label} (VIP)`,
-                  name: `${srv.label} (VIP)`,
-                  url: proxyStreamUrl,
-                  src: proxyStreamUrl,
-                  rawUrl: mediaItem.url,
-                  proxyUrl: proxyStreamUrl,
-                  type: mediaItem.type
-                });
-              } else {
-                allIframes.push(mediaItem.url);
-                const proxyEmbedUrl = `/api/videos?embedProxy=1&url=${encodeURIComponent(mediaItem.url)}&referer=${encodeURIComponent(postLink)}`;
-                customSources.push({
-                  label: srv.label,
-                  name: srv.label,
-                  url: proxyEmbedUrl,
-                  src: proxyEmbedUrl,
-                  type: "iframe"
-                });
-                customSources.push({
-                  label: `${srv.label} (Gốc)`,
-                  name: `${srv.label} (Gốc)`,
-                  url: mediaItem.url,
-                  src: mediaItem.url,
-                  type: "iframe"
-                });
-              }
+              registerMediaSource(mediaItem, srv.label);
             }
           });
 
@@ -1825,61 +1941,81 @@ export async function GET(req) {
           }
         }
 
-        // 2. Nếu bài viết (như mục Video của thành viên bai-viet/...) nhúng trực tiếp <video> hoặc <iframe> trong bài
-        if (customSources.length === 0) {
-          const directItems = extractDirectPostMedia(
-            pageHtml,
-            baseDomain,
-            baseHost
-          );
-          for (let i = 0; i < directItems.length; i++) {
-            const dItem = directItems[i];
-            const srvLabel = `Server #${i + 1}`;
-            if (dItem.type === "hls" || dItem.type === "mp4") {
-              allStreams.push(dItem.url);
-              const proxyStreamUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(dItem.url)}&referer=${encodeURIComponent(postLink)}`;
-              customSources.push({
-                label: srvLabel,
-                name: srvLabel,
-                url: dItem.url,
-                src: dItem.url,
-                proxyUrl: proxyStreamUrl,
-                type: dItem.type
-              });
-              customSources.push({
-                label: `${srvLabel} (Proxy)`,
-                name: `${srvLabel} (Proxy)`,
-                url: proxyStreamUrl,
-                src: proxyStreamUrl,
-                type: dItem.type
-              });
-            } else {
-              allIframes.push(dItem.url);
-              const proxyEmbedUrl = `/api/videos?embedProxy=1&url=${encodeURIComponent(dItem.url)}&referer=${encodeURIComponent(postLink)}`;
-              customSources.push({
-                label: srvLabel,
-                name: srvLabel,
-                url: proxyEmbedUrl,
-                src: proxyEmbedUrl,
-                type: "iframe"
-              });
-              customSources.push({
-                label: `${srvLabel} (Gốc)`,
-                name: `${srvLabel} (Gốc)`,
-                url: dItem.url,
-                src: dItem.url,
-                type: "iframe"
-              });
+        // BƯỚC 2: Luôn quét thêm luồng nhúng trực tiếp trong bài (cứu cánh cho Video cũ & Video thành viên)
+        const directItems = extractLegacyAndDirectMedia(
+          pageHtml,
+          baseDomain,
+          baseHost
+        );
+        const existingUrls = new Set(
+          customSources.map((s) => s.rawUrl || s.url)
+        );
+
+        let extraIdx = 1;
+        for (const dItem of directItems) {
+          if (existingUrls.has(dItem.url)) continue;
+          existingUrls.add(dItem.url);
+          const label =
+            servers.length === 0
+              ? `Server #${extraIdx}`
+              : ` Dự phòng #${extraIdx}`;
+          extraIdx++;
+
+          if (dItem.type === "iframe") {
+            const { directStreams, isAlive } = await resolveEmbedPage(
+              dItem.url,
+              postLink,
+              baseDomain
+            );
+            for (const ds of directStreams) {
+              registerMediaSource(
+                { ...ds, isAlive: true },
+                label.trim()
+              );
             }
+            registerMediaSource({ ...dItem, isAlive }, label.trim());
+          } else {
+            registerMediaSource({ ...dItem, isAlive: true }, label.trim());
           }
         }
       }
 
-      customSources.sort((a, b) => {
-        const aDirect = a.type === "hls" || a.type === "mp4" ? 0 : 1;
-        const bDirect = b.type === "hls" || b.type === "mp4" ? 0 : 1;
-        return aDirect - bDirect;
-      });
+      // BƯỚC 3: Nếu cả trang HTML không trả về luồng nào (ví dụ bài cực cũ hoặc bị ẩn trong REST API), gọi WP REST API dự phòng
+      if (customSources.length === 0) {
+        try {
+          const tailSlug = cleanSlug.split("/").pop();
+          const wpRes = await fetchWithTimeout(
+            `${baseDomain}/wp-json/wp/v2/posts?slug=${encodeURIComponent(tailSlug)}&_embed`,
+            { headers: reqHeaders },
+            5000
+          );
+          if (wpRes.ok) {
+            const wpPosts = await wpRes.json();
+            if (Array.isArray(wpPosts) && wpPosts.length > 0) {
+              const p = wpPosts[0];
+              if (!title || title === cleanSlug) {
+                title = cleanText(p.title?.rendered || cleanSlug);
+              }
+              const wpMedia = parsePlayerHtml(
+                JSON.stringify(p),
+                baseDomain
+              ).filter(
+                (x) =>
+                  !x.url.includes(baseHost) && !x.url.includes("viet69")
+              );
+              wpMedia.forEach((mItem, idx) => {
+                registerMediaSource(
+                  { ...mItem, isAlive: true },
+                  `Server #${idx + 1}`
+                );
+              });
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Sắp xếp đưa các Server đang sống & luồng VIP lên đầu tiên
+      customSources.sort((a, b) => (a.priority || 5) - (b.priority || 5));
 
       const streams = [...new Set(allStreams)];
       const iframes = [...new Set(allIframes)];
