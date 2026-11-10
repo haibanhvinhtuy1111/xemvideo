@@ -387,20 +387,20 @@ export default function HomePage() {
     SORT_OPTIONS.find((o) => o.id === sortBy)?.label || "Mới nhất";
 
   return (
-    <div className="min-h-screen bg-[#0f172a] text-slate-100">
+    <div className="min-h-screen bg-background text-textMain">
       {/* Thanh điều hướng dính (Sticky) */}
-      <div className="sticky top-0 z-20 border-b border-slate-800/80 bg-[#0f172a]/90 backdrop-blur-md">
-        <div className="max-w-6xl mx-auto px-3 sm:px-4 py-2.5 sm:py-3.5 space-y-2.5">
+      <div className="sticky top-0 z-20 border-b border-border bg-surface/90 backdrop-blur-md">
+        <div className="mx-auto max-w-6xl space-y-2.5 px-3 py-2.5 sm:px-4 sm:py-3.5">
           {/* Ô tìm kiếm */}
           <form
             onSubmit={handleSearchSubmit}
-            className="flex items-center max-w-lg mx-auto rounded-full border border-slate-700/80 bg-slate-900/90 px-3.5 py-1.5 focus-within:border-indigo-400/80 transition-all"
+            className="mx-auto flex max-w-lg items-center rounded-full border border-border bg-sub px-3.5 py-1.5 transition-all focus-within:border-primary focus-within:ring-1 focus-within:ring-primary"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 20 20"
               fill="currentColor"
-              className="w-4 h-4 text-slate-400 mr-2 shrink-0"
+              className="mr-2 h-4 w-4 shrink-0 text-textSub"
             >
               <path
                 fillRule="evenodd"
@@ -413,7 +413,7 @@ export default function HomePage() {
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               placeholder="Tìm kiếm video..."
-              className="w-full bg-transparent text-base sm:text-sm text-slate-100 placeholder-slate-400 outline-none"
+              className="w-full bg-transparent text-base text-textMain placeholder:text-textSub outline-none sm:text-sm"
             />
             {searchInput && (
               <button
@@ -426,21 +426,21 @@ export default function HomePage() {
                     setPage(1);
                   }
                 }}
-                className="px-2 text-slate-400 hover:text-slate-200 text-xs"
+                className="px-2 text-xs text-textSub transition-colors hover:text-textMain"
               >
                 ✕
               </button>
             )}
             <button
               type="submit"
-              className="ml-1 rounded-full bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white px-3.5 py-1 text-xs font-medium transition-colors shrink-0"
+              className="ml-1 shrink-0 rounded-full bg-primary-light px-3.5 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary hover:text-primary-foreground"
             >
               Tìm
             </button>
           </form>
 
           {/* Thanh danh mục vuốt ngang trên mobile */}
-          <nav className="flex items-center sm:justify-center overflow-x-auto sm:flex-wrap gap-1.5 pb-1 sm:pb-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <nav className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:flex-wrap sm:justify-center sm:pb-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {MAIN_CATEGORIES.map((cat) => {
               const isActive = !q && category === cat.slug;
               return (
@@ -448,19 +448,19 @@ export default function HomePage() {
                   key={cat.slug}
                   type="button"
                   onClick={() => handleSelectCategory(cat.slug)}
-                  className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs sm:text-[13px] font-medium transition-all flex items-center gap-1.5 ${
+                  className={`flex shrink-0 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition-all sm:text-[13px] ${
                     isActive
-                      ? "bg-indigo-500 text-white shadow-sm shadow-indigo-500/30"
-                      : "bg-slate-800/60 text-slate-300 hover:bg-slate-800 hover:text-white border border-slate-700/40"
+                      ? "bg-primary text-primary-foreground shadow-sm shadow-primary/25"
+                      : "border border-border bg-sub text-textMain hover:border-primary/40 hover:bg-surface"
                   }`}
                 >
                   <span>{cat.name}</span>
                   {cat.badge && (
                     <span
-                      className={`rounded-full px-1.5 py-0.2 text-[10px] font-semibold ${
+                      className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none ${
                         isActive
-                          ? "bg-white/20 text-white"
-                          : "bg-emerald-500/15 text-emerald-300"
+                          ? "bg-black/20 text-primary-foreground"
+                          : "bg-hot-bg text-hot"
                       }`}
                     >
                       {cat.badge}
@@ -474,10 +474,10 @@ export default function HomePage() {
               type="button"
               onClick={() => setShowMoreTags(!showMoreTags)}
               title="Xem thêm thẻ"
-              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
+              className={`shrink-0 rounded-full border px-3 py-1.5 text-xs font-semibold transition-all ${
                 showMoreTags
-                  ? "bg-indigo-500/20 border-indigo-500/40 text-indigo-300"
-                  : "bg-slate-800/60 border-slate-700/40 text-slate-300 hover:bg-slate-800 hover:text-white"
+                  ? "border-primary/40 bg-primary-light text-primary"
+                  : "border-border bg-sub text-textSub hover:bg-surface hover:text-textMain"
               }`}
             >
               •••
@@ -485,7 +485,7 @@ export default function HomePage() {
           </nav>
 
           {showMoreTags && (
-            <div className="pt-2 pb-1 border-t border-slate-800/80 flex flex-wrap items-center justify-center gap-1.5 max-h-40 overflow-y-auto">
+            <div className="flex max-h-40 flex-wrap items-center justify-center gap-1.5 overflow-y-auto border-t border-border pb-1 pt-2">
               {mergedExtraTags.map((tag) => {
                 const isActive = !q && category === tag.slug;
                 return (
@@ -493,10 +493,10 @@ export default function HomePage() {
                     key={tag.slug}
                     type="button"
                     onClick={() => handleSelectCategory(tag.slug)}
-                    className={`px-2.5 py-1 rounded-full text-xs transition ${
+                    className={`rounded-full px-2.5 py-1 text-xs transition ${
                       isActive
-                        ? "bg-indigo-500 text-white font-medium"
-                        : "bg-slate-800/50 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                        ? "bg-primary font-medium text-primary-foreground"
+                        : "border border-border bg-sub text-textSub hover:bg-surface hover:text-textMain"
                     }`}
                   >
                     #{tag.name}
@@ -509,18 +509,18 @@ export default function HomePage() {
       </div>
 
       {/* Khu vực danh sách Video */}
-      <div className="max-w-6xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
-        <div className="mb-4 sm:mb-6 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="inline-block w-1.5 h-5 rounded-full bg-indigo-400 shrink-0" />
-            <h2 className="text-sm sm:text-lg font-semibold text-slate-100 truncate">
+      <div className="mx-auto max-w-6xl px-3 py-4 sm:px-4 sm:py-6">
+        <div className="mb-4 flex items-center justify-between gap-2 sm:mb-6">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="inline-block h-5 w-1.5 shrink-0 rounded-full bg-primary" />
+            <h2 className="truncate text-sm font-semibold text-textMain sm:text-lg">
               {q
                 ? `Tìm kiếm: "${q}"`
                 : MAIN_CATEGORIES.find((c) => c.slug === category)?.name ||
                   mergedExtraTags.find((t) => t.slug === category)?.name ||
                   category.replace(/^tag\/|^category\//, "#")}
             </h2>
-            <span className="text-[11px] sm:text-xs text-slate-400 shrink-0">
+            <span className="shrink-0 text-[11px] text-textSub sm:text-xs">
               (Trang {page}/{totalPages})
             </span>
           </div>
@@ -530,19 +530,19 @@ export default function HomePage() {
             <button
               type="button"
               onClick={() => setSortOpen(!sortOpen)}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-800/70 hover:bg-slate-800 border border-slate-700/60 px-2.5 sm:px-3.5 py-1.5 sm:py-2 text-xs text-slate-300 transition"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-2.5 py-1.5 text-xs text-textSub transition hover:bg-sub sm:px-3.5 sm:py-2"
             >
-              <span className="text-slate-400 hidden sm:inline">
+              <span className="hidden text-textSub sm:inline">
                 Sắp xếp theo
               </span>
-              <span className="font-semibold text-white">
+              <span className="font-semibold text-textMain">
                 {currentSortLabel}
               </span>
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 viewBox="0 0 20 20"
                 fill="currentColor"
-                className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${
+                className={`h-3.5 w-3.5 text-textSub transition-transform duration-200 ${
                   sortOpen ? "rotate-180" : ""
                 }`}
               >
@@ -555,7 +555,7 @@ export default function HomePage() {
             </button>
 
             {sortOpen && (
-              <div className="absolute right-0 mt-1.5 w-40 rounded-xl bg-[#1e293b] border border-slate-700/80 py-1.5 shadow-xl shadow-black/40 z-30">
+              <div className="absolute right-0 z-30 mt-1.5 w-40 rounded-xl border border-border bg-surface py-1.5 shadow-xl">
                 {SORT_OPTIONS.map((opt) => {
                   const active = sortBy === opt.id;
                   return (
@@ -571,15 +571,15 @@ export default function HomePage() {
                         setSortOpen(false);
                         setPage(1);
                       }}
-                      className={`w-full text-left px-3.5 py-2 text-xs sm:text-sm transition-colors flex items-center justify-between ${
+                      className={`flex w-full items-center justify-between px-3.5 py-2 text-left text-xs transition-colors sm:text-sm ${
                         active
-                          ? "text-indigo-400 font-semibold bg-indigo-500/10"
-                          : "text-slate-200 hover:bg-slate-800/80 hover:text-white"
+                          ? "bg-primary-light font-semibold text-primary"
+                          : "text-textMain hover:bg-sub"
                       }`}
                     >
                       <span>{opt.label}</span>
                       {active && (
-                        <span className="h-1.5 w-1.5 rounded-full bg-indigo-400" />
+                        <span className="h-1.5 w-1.5 rounded-full bg-primary" />
                       )}
                     </button>
                   );
@@ -591,35 +591,35 @@ export default function HomePage() {
 
         {/* Lưới Video */}
         {loading ? (
-          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 sm:gap-5 md:grid-cols-3 lg:grid-cols-4">
             {Array.from({ length: 12 }).map((_, i) => (
               <div
                 key={i}
-                className="rounded-2xl bg-slate-800/35 border border-slate-800/70 overflow-hidden animate-pulse"
+                className=" animate-pulse overflow-hidden rounded-2xl border border-border bg-surface"
               >
-                <div className="aspect-video w-full bg-slate-800/70" />
-                <div className="p-2.5 sm:p-3.5 space-y-2">
-                  <div className="h-3 bg-slate-800 rounded w-11/12" />
-                  <div className="h-3 bg-slate-800 rounded w-2/3" />
+                <div className="aspect-video w-full bg-sub" />
+                <div className="space-y-2 p-2.5 sm:p-3.5">
+                  <div className="h-3 w-11/12 rounded bg-sub" />
+                  <div className="h-3 w-2/3 rounded bg-sub" />
                 </div>
               </div>
             ))}
           </div>
         ) : items.length === 0 ? (
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-10 text-center space-y-3">
-            <p className="text-slate-400 text-sm">
+          <div className="space-y-3 rounded-2xl border border-border bg-surface p-10 text-center shadow-sm">
+            <p className="text-sm text-textSub">
               Không tìm thấy video nào trong mục này.
             </p>
             <button
               type="button"
               onClick={() => handleSelectCategory("all")}
-              className="px-4 py-2 rounded-full bg-indigo-500 text-white text-xs font-medium hover:bg-indigo-400 transition"
+              className="rounded-full bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition hover:bg-primary-hover"
             >
               Về trang tất cả
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 sm:gap-5 md:grid-cols-3 lg:grid-cols-4">
             {items.map((item, idx) => (
               <VideoCard key={item.slug || item.id || idx} video={item} />
             ))}
@@ -628,9 +628,9 @@ export default function HomePage() {
 
         {/* Thanh phân trang rút gọn chuẩn */}
         {!loading && items.length > 0 && totalPages > 1 && (
-          <div className="mt-10 pt-6 border-t border-slate-800/80 flex flex-col items-center gap-4">
+          <div className="mt-10 flex flex-col items-center gap-4 border-t border-border pt-6">
             <div className="flex flex-wrap items-center justify-center gap-1.5">
-              <span className="px-2.5 py-1.5 rounded-lg bg-slate-800/70 border border-slate-700/60 text-xs font-medium text-slate-300">
+              <span className="rounded-lg border border-border bg-sub px-2.5 py-1.5 text-xs font-medium text-textSub">
                 Page {page.toLocaleString("en-US")} of{" "}
                 {totalPages.toLocaleString("en-US")}
               </span>
@@ -640,14 +640,14 @@ export default function HomePage() {
                   <button
                     type="button"
                     onClick={() => changePage(1)}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-xs font-medium text-slate-200 transition"
+                    className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-textMain transition hover:bg-sub"
                   >
                     « First
                   </button>
                   <button
                     type="button"
                     onClick={() => changePage(page - 1)}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-xs font-medium text-slate-200 transition"
+                    className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-textMain transition hover:bg-sub"
                   >
                     «
                   </button>
@@ -658,7 +658,7 @@ export default function HomePage() {
                 tok === "..." ? (
                   <span
                     key={`dots-${idx}`}
-                    className="px-1.5 py-1.5 text-xs text-slate-500 select-none"
+                    className="select-none px-1.5 py-1.5 text-xs text-textSub"
                   >
                     ...
                   </span>
@@ -667,10 +667,10 @@ export default function HomePage() {
                     key={tok}
                     type="button"
                     onClick={() => changePage(tok)}
-                    className={`min-w-[34px] px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                    className={`min-w-[34px] rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition ${
                       page === tok
-                        ? "bg-indigo-500 border-indigo-400 text-white shadow-sm shadow-indigo-500/30"
-                        : "bg-slate-800/80 hover:bg-slate-700 border-slate-700/60 text-slate-200"
+                        ? "border-primary bg-primary text-primary-foreground shadow-sm shadow-primary/25"
+                        : "border-border bg-surface text-textMain hover:bg-sub"
                     }`}
                   >
                     {tok.toLocaleString("en-US")}
@@ -683,14 +683,14 @@ export default function HomePage() {
                   <button
                     type="button"
                     onClick={() => changePage(page + 1)}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-xs font-medium text-slate-200 transition"
+                    className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-textMain transition hover:bg-sub"
                   >
                     »
                   </button>
                   <button
                     type="button"
                     onClick={() => changePage(totalPages)}
-                    className="px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-xs font-medium text-slate-200 transition"
+                    className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-textMain transition hover:bg-sub"
                   >
                     Last »
                   </button>
@@ -700,7 +700,7 @@ export default function HomePage() {
 
             <form
               onSubmit={handleJumpPage}
-              className="flex items-center gap-2 text-xs text-slate-400"
+              className="flex items-center gap-2 text-xs text-textSub"
             >
               <span>Đi tới trang:</span>
               <input
@@ -710,11 +710,11 @@ export default function HomePage() {
                 value={jumpPageInput}
                 onChange={(e) => setJumpPageInput(e.target.value)}
                 placeholder={`1 - ${totalPages}`}
-                className="w-24 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-base sm:text-xs text-slate-100 outline-none focus:border-indigo-400"
+                className="w-24 rounded-lg border border-border bg-sub px-2.5 py-1 text-base text-textMain placeholder:text-textSub outline-none focus:border-primary sm:text-xs"
               />
               <button
                 type="submit"
-                className="rounded-lg bg-slate-800 hover:bg-indigo-500 px-3.5 py-1.5 sm:py-1 text-xs font-medium text-slate-200 hover:text-white transition"
+                className="rounded-lg border border-border bg-surface px-3.5 py-1.5 text-xs font-medium text-textMain transition hover:border-primary hover:bg-primary hover:text-primary-foreground sm:py-1"
               >
                 Đi
               </button>
