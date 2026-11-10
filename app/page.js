@@ -41,7 +41,7 @@ const SORT_OPTIONS = [
 ];
 
 const STATE_STORAGE_KEY = "videosite_browse_state_v1";
-const CACHE_STORAGE_KEY = "videosite_list_cache_v3";
+const CACHE_STORAGE_KEY = "videosite_list_cache_v4";
 const SCROLL_STORAGE_KEY = "videosite_scroll_y_v1";
 
 // Giới hạn thanh phân trang tối đa 5-7 nút gọn gàng, không bao giờ xổ tràn hàng
