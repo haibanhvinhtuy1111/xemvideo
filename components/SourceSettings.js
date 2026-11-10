@@ -46,25 +46,26 @@ export default function SourceSettings() {
 
   return (
     <div className="relative" ref={boxRef}>
+      {/* Nút Mở Cài Đặt */}
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs sm:text-sm font-medium text-slate-200 hover:bg-slate-800 hover:border-indigo-500/50 transition"
+        className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-sub px-3 py-1.5 text-xs font-medium text-textMain transition hover:border-primary/50 hover:bg-surface sm:text-sm"
       >
         <span>⚙</span>
         <span>Nguồn</span>
       </button>
 
       {open && (
-        <div className="fixed inset-x-3 top-16 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80 rounded-2xl border border-slate-700/90 bg-[#1e293b] p-4 shadow-2xl shadow-black/50 z-50">
-          <div className="flex items-center justify-between mb-2">
-            <label className="text-xs font-medium text-slate-300">
+        <div className="fixed inset-x-3 top-16 z-50 rounded-2xl border border-border bg-surface p-4 shadow-2xl sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80">
+          <div className="mb-2 flex items-center justify-between">
+            <label className="text-xs font-medium text-textSub">
               Tên miền nguồn (để trống = mặc định)
             </label>
             <button
               type="button"
               onClick={() => setOpen(false)}
-              className="text-slate-400 hover:text-slate-200 text-xs px-1"
+              className="px-1 text-xs text-textSub transition-colors hover:text-textMain"
             >
               ✕
             </button>
@@ -78,23 +79,23 @@ export default function SourceSettings() {
               setErr("");
             }}
             placeholder="https://viet69.be"
-            className="w-full rounded-xl border border-slate-700 bg-slate-900/90 px-3.5 py-2 text-base sm:text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-indigo-400"
+            className="w-full rounded-xl border border-border bg-sub px-3.5 py-2 text-base text-textMain placeholder:text-textSub outline-none focus:border-primary focus:ring-1 focus:ring-primary sm:text-sm"
           />
 
-          {err && <p className="mt-1.5 text-xs text-rose-400">{err}</p>}
+          {err && <p className="mt-1.5 text-xs text-hot">{err}</p>}
 
           <div className="mt-3 flex items-center gap-2">
             <button
               type="button"
               onClick={onSave}
-              className="flex-1 rounded-xl bg-indigo-500 hover:bg-indigo-400 py-2 text-xs sm:text-sm font-semibold text-white transition"
+              className="flex-1 rounded-xl bg-primary py-2 text-xs font-semibold text-primary-foreground transition hover:bg-primary-hover sm:text-sm"
             >
               Lưu cấu hình
             </button>
             <button
               type="button"
               onClick={onReset}
-              className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-2 text-xs sm:text-sm text-slate-300 transition"
+              className="rounded-xl border border-border bg-sub px-3 py-2 text-xs text-textMain transition hover:bg-surface sm:text-sm"
             >
               Mặc định
             </button>
