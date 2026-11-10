@@ -12,7 +12,8 @@ export default function Player({
 }) {
   const videoRef = useRef(null);
   const [activeIdx, setActiveIdx] = useState(0);
-  const [useProxyStream, setUseProxyStream] = useState(false);
+  const [useBackupMode, setUseBackupMode] = useState(false);
+  const [autoSwitchedMsg, setAutoSwitchedMsg] = useState("");
   const [showDebug, setShowDebug] = useState(false);
 
   const rawSources = propSources || video?.sources || [];
@@ -52,28 +53,46 @@ export default function Player({
       : [];
 
   const current = normalizedSources[activeIdx] || normalizedSources[0] || null;
-  const rawActiveUrl = current?.url || current?.src || "";
+  const primaryUrl = current?.url || current?.src || "";
+  const backupUrl = current?.backupUrl || current?.proxyUrl || "";
+
+  const activeUrl =
+    useBackupMode && backupUrl ? backupUrl : primaryUrl;
+
   const activeType =
     current?.type ||
-    (rawActiveUrl.includes(".m3u8") ||
-    rawActiveUrl.includes("rawProxy=1") ||
-    rawActiveUrl.includes("hlsProxy=1")
+    (activeUrl.includes(".m3u8") ||
+    activeUrl.includes("rawProxy=1") ||
+    activeUrl.includes("hlsProxy=1")
       ? "hls"
-      : rawActiveUrl.includes(".mp4")
+      : activeUrl.includes(".mp4")
       ? "mp4"
       : "iframe");
 
-  const activeUrl =
-    useProxyStream && current?.proxyUrl ? current.proxyUrl : rawActiveUrl;
-
   useEffect(() => {
     setActiveIdx(0);
-    setUseProxyStream(false);
+    setUseBackupMode(false);
+    setAutoSwitchedMsg("");
   }, [video?.slug, fallbackUrl]);
 
   useEffect(() => {
-    setUseProxyStream(false);
+    setUseBackupMode(false);
   }, [activeIdx]);
+
+  // Hàm tự động nhảy sang Server kế tiếp nếu Server hiện tại bị lỗi
+  const handleAutoSwitchNext = () => {
+    if (!useBackupMode && backupUrl && backupUrl !== primaryUrl) {
+      setUseBackupMode(true);
+      return;
+    }
+    if (activeIdx + 1 < normalizedSources.length) {
+      const nextIndex = activeIdx + 1;
+      const nextLabel =
+        normalizedSources[nextIndex]?.label || `Server #${nextIndex + 1}`;
+      setAutoSwitchedMsg(`Đã tự động chuyển sang ${nextLabel} do luồng trước phản hồi chậm.`);
+      setActiveIdx(nextIndex);
+    }
+  };
 
   useEffect(() => {
     if (!activeUrl || activeType === "iframe" || !videoRef.current) return;
@@ -94,7 +113,7 @@ export default function Player({
     const initHls = () => {
       if (window.Hls && window.Hls.isSupported()) {
         hlsInstance = new window.Hls({
-          enableWorker: true,
+          enableWorker: false,
           lowLatencyMode: false,
           xhrSetup: (xhr) => {
             xhr.withCredentials = false;
@@ -107,18 +126,8 @@ export default function Player({
         });
         hlsInstance.on(window.Hls.Events.ERROR, (_, data) => {
           if (data.fatal) {
-            if (
-              !useProxyStream &&
-              current?.proxyUrl &&
-              current.proxyUrl !== activeUrl
-            ) {
-              hlsInstance.destroy();
-              setUseProxyStream(true);
-            } else if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
-              hlsInstance.startLoad();
-            } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
-              hlsInstance.recoverMediaError();
-            }
+            hlsInstance.destroy();
+            handleAutoSwitchNext();
           }
         });
       } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
@@ -146,12 +155,25 @@ export default function Player({
         hlsInstance.destroy();
       }
     };
-  }, [activeUrl, activeType, useProxyStream, current]);
+  }, [activeUrl, activeType, useBackupMode, activeIdx]);
 
   if (!activeUrl) {
     return (
-      <div className="p-6 rounded-2xl bg-slate-900/70 border border-slate-800 text-slate-400 space-y-2">
-        <p className="text-sm">Chưa có luồng phát cho video này.</p>
+      <div className="p-6 rounded-2xl bg-slate-900/70 border border-slate-800 text-slate-300 space-y-3">
+        <p className="text-sm">
+          Video này hiện không có luồng phát khả dụng hoặc đã bị xóa trên máy chủ nguồn.
+        </p>
+        {video?.postLink && (
+          <a
+            href={video.postLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 px-4 py-2 text-xs font-semibold text-white transition"
+          >
+            <span>Kiểm tra trên trang gốc</span>
+            <span>↗</span>
+          </a>
+        )}
         {video?._debug && (
           <div className="text-xs text-slate-500 font-mono space-y-1 pt-2 border-t border-slate-800">
             <p>
@@ -173,7 +195,6 @@ export default function Player({
 
   return (
     <div className="space-y-3.5">
-      {/* Khung phát Video bo góc trên máy tính, rộng thoáng trên điện thoại */}
       <div className="relative aspect-video w-full bg-black rounded-xl sm:rounded-2xl overflow-hidden border border-slate-800/90 shadow-xl shadow-black/40">
         {activeType === "iframe" ? (
           <iframe
@@ -195,23 +216,21 @@ export default function Player({
             controls
             autoPlay
             playsInline
-            onError={() => {
-              if (
-                !useProxyStream &&
-                current?.proxyUrl &&
-                current.proxyUrl !== activeUrl
-              ) {
-                setUseProxyStream(true);
-              }
-            }}
+            onError={handleAutoSwitchNext}
             className="w-full h-full object-contain"
           />
         )}
       </div>
 
-      {/* Hàng nút chọn Server dễ chạm trên điện thoại */}
+      {autoSwitchedMsg && (
+        <p className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-1.5">
+          ⚡ {autoSwitchedMsg}
+        </p>
+      )}
+
+      {/* Hàng nút chọn Server & Công cụ đổi nhanh */}
       <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
           <span className="text-xs text-slate-400 mr-1 hidden sm:inline">
             Máy chủ:
           </span>
@@ -219,8 +238,11 @@ export default function Player({
             <button
               key={idx}
               type="button"
-              onClick={() => setActiveIdx(idx)}
-              className={`px-3.5 py-2 sm:py-1.5 rounded-xl text-xs font-medium transition-all ${
+              onClick={() => {
+                setAutoSwitchedMsg("");
+                setActiveIdx(idx);
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${
                 activeIdx === idx
                   ? "bg-indigo-500 text-white shadow-sm shadow-indigo-500/30"
                   : "bg-slate-800/80 text-slate-300 hover:bg-slate-700 border border-slate-700/60"
@@ -229,6 +251,18 @@ export default function Player({
               {s.label || s.name || `Server #${idx + 1}`}
             </button>
           ))}
+
+          {/* Nút nhảy nhanh sang Server kế tiếp nếu người xem thấy quay lâu */}
+          {normalizedSources.length > 1 && (
+            <button
+              type="button"
+              onClick={handleAutoSwitchNext}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-800/50 hover:bg-slate-800 border border-slate-700/50 text-xs text-indigo-300 transition"
+              title="Bấm nếu server hiện tại tải chậm"
+            >
+              Đổi Server ↻
+            </button>
+          )}
         </div>
 
         <button
