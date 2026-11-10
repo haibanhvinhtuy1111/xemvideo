@@ -1,29 +1,104 @@
 "use client";
-import { useEffect, useState } from "react";
+
+import { useEffect, useRef, useState } from "react";
 import { getSource, saveSource } from "@/config/site";
 
 export default function SourceSettings() {
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState("");
   const [err, setErr] = useState("");
-  useEffect(() => setValue(getSource()), []);
+  const boxRef = useRef(null);
+
+  useEffect(() => {
+    if (typeof getSource === "function") {
+      setValue(getSource() || "");
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (boxRef.current && !boxRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   const onSave = () => {
-    try { saveSource(value); window.location.reload(); }
-    catch (e) { setErr(e.message); }
+    try {
+      saveSource(value.trim());
+      setOpen(false);
+      window.location.reload();
+    } catch (e) {
+      setErr(e.message);
+    }
   };
+
+  const onReset = () => {
+    try {
+      saveSource("");
+      setValue("");
+      setOpen(false);
+      window.location.reload();
+    } catch (_) {}
+  };
+
   return (
-    <div className="relative">
-      <button onClick={() => setOpen(!open)} className="rounded-md border border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-800">⚙ Nguồn</button>
+    <div className="relative" ref={boxRef}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs sm:text-sm font-medium text-slate-200 hover:bg-slate-800 hover:border-indigo-500/50 transition"
+      >
+        <span>⚙</span>
+        <span>Nguồn</span>
+      </button>
+
       {open && (
-        <div className="absolute right-0 mt-2 w-80 max-w-[90vw] rounded-lg border border-zinc-700 bg-zinc-900 p-4 shadow-xl">
-          <label className="text-xs text-zinc-400">Domain / endpoint API (để trống = API nội bộ)</label>
-          <input value={value} onChange={(e) => { setValue(e.target.value); setErr(""); }}
-            placeholder="https://api.example.com"
-            className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-rose-500" />
-          {err && <p className="mt-1 text-xs text-red-400">{err}</p>}
-          <button onClick={onSave} className="mt-3 w-full rounded-md bg-rose-600 py-2 text-sm font-medium hover:bg-rose-500">Lưu</button>
-          <p className="mt-2 text-xs text-zinc-500">API cần trả về đúng định dạng trong README và bật CORS.</p>
+        <div className="fixed inset-x-3 top-16 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80 rounded-2xl border border-slate-700/90 bg-[#1e293b] p-4 shadow-2xl shadow-black/50 z-50">
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-xs font-medium text-slate-300">
+              Tên miền nguồn (để trống = mặc định)
+            </label>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="text-slate-400 hover:text-slate-200 text-xs px-1"
+            >
+              ✕
+            </button>
+          </div>
+
+          <input
+            type="url"
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setErr("");
+            }}
+            placeholder="https://viet69.be"
+            className="w-full rounded-xl border border-slate-700 bg-slate-900/90 px-3.5 py-2 text-base sm:text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-indigo-400"
+          />
+
+          {err && <p className="mt-1.5 text-xs text-rose-400">{err}</p>}
+
+          <div className="mt-3 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onSave}
+              className="flex-1 rounded-xl bg-indigo-500 hover:bg-indigo-400 py-2 text-xs sm:text-sm font-semibold text-white transition"
+            >
+              Lưu cấu hình
+            </button>
+            <button
+              type="button"
+              onClick={onReset}
+              className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-2 text-xs sm:text-sm text-slate-300 transition"
+            >
+              Mặc định
+            </button>
+          </div>
         </div>
       )}
     </div>
