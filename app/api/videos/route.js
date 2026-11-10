@@ -95,13 +95,9 @@ const CATEGORY_MAP = {
     keyword: "việt nam"
   },
   "video-cua-thanh-vien": {
-    paths: [
-      "bai-viet",
-      "video-cua-thanh-vien",
-      "category/video-cua-thanh-vien",
-      "tag/video-cua-thanh-vien"
-    ],
-    keyword: "thành viên chia sẻ"
+    paths: ["bai-viet"],
+    keyword: "thành viên chia sẻ",
+    onlyMemberPosts: true
   },
   "phim-sex-sinh-vien": {
     paths: [
@@ -1536,22 +1532,32 @@ async function fetchViet69PlayerUrl({
 function extractTotalPagesFromHtml(html = "", currentPage = 1) {
   let maxPage = currentPage;
 
-  const ofMatch = html.match(
+  // Khoanh vùng riêng khối phân trang (.wp-pagenavi, .pagination, .nav-links, .page-numbers) để không bắt nhầm link trang khác
+  const navZoneMatch = html.match(
+    /<(?:div|nav|ul)[^>]*class=["']?[^"'>]*(?:wp-pagenavi|pagination|nav-links|page-numbers|pagenavi)[^"'>]*["']?[^>]*>[\s\S]{0,4000}?<\/(?:div|nav|ul)>/i
+  );
+  const scopeHtml = navZoneMatch ? navZoneMatch[0] : html;
+
+  // 1. Ưu tiên đọc chuỗi "Page 1 of 1,050"
+  const ofMatch = scopeHtml.match(
     /(?:Page|Trang)\s+\d+\s+(?:of|trên|của|\/)\s+([\d,.]+)/i
   );
   if (ofMatch && ofMatch[1]) {
     const num = parseInt(ofMatch[1].replace(/[,.]/g, ""), 10);
-    if (!isNaN(num) && num > maxPage) {
-      maxPage = num;
+    if (!isNaN(num) && num >= currentPage) {
+      return num;
     }
   }
 
-  const pageRegex = /\/page\/(\d+)\/?/gi;
-  let m;
-  while ((m = pageRegex.exec(html)) !== null) {
-    const p = parseInt(m[1], 10);
-    if (!isNaN(p) && p > maxPage && p < 500000) {
-      maxPage = p;
+  // 2. Chỉ quét các số trang nằm bên trong khối phân trang chính
+  if (navZoneMatch) {
+    const pageRegex = /\/page\/(\d+)\/?/gi;
+    let m;
+    while ((m = pageRegex.exec(scopeHtml)) !== null) {
+      const p = parseInt(m[1], 10);
+      if (!isNaN(p) && p > maxPage && p < 100000) {
+        maxPage = p;
+      }
     }
   }
 
@@ -1709,11 +1715,28 @@ function parseVideoListHtml(
   const items = [];
   const seen = new Set();
 
-  const articleBlocks = html.match(/<article[\s\S]*?<\/article>/gi) || [];
+  // Cắt bỏ phần Sidebar / Footer chứa các danh sách phụ để không bị trộn lẫn bài của trang khác
+  let mainScope = html;
+  const mainMatch = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
+  if (mainMatch) {
+    mainScope = mainMatch[1];
+  } else {
+    const sidebarIdx = html.search(
+      /<(?:aside|div)[^>]*id=["']?(?:sidebar|secondary|footer)["']?/i
+    );
+    if (sidebarIdx > 2000) {
+      mainScope = html.slice(0, sidebarIdx);
+    }
+  }
+
+  const isMemberCat =
+    category === "video-cua-thanh-vien" || category === "bai-viet";
+
+  const articleBlocks = mainScope.match(/<article[\s\S]*?<\/article>/gi) || [];
   const blocks =
     articleBlocks.length > 0
       ? articleBlocks
-      : html.split(
+      : mainScope.split(
           /(?=<div[^>]+class=["']?[^"'>]*(?:post-|loop-video|video-item|clip-item|entry-item|item-video|col-video)[^"'>]*["']?)/i
         );
 
@@ -1758,6 +1781,16 @@ function parseVideoListHtml(
 
     const itemSlug = chosenUrl.pathname.replace(/^\/+|\/+$/g, "");
     if (!itemSlug || seen.has(itemSlug)) continue;
+
+    // Nếu đang ở mục Video của thành viên nhưng trang có chèn bài quảng cáo ngoài luồng thì lọc chuẩn
+    if (
+      isMemberCat &&
+      mainScope.includes("/bai-viet/") &&
+      !itemSlug.startsWith("bai-viet/")
+    ) {
+      continue;
+    }
+
     seen.add(itemSlug);
 
     const titleFromA = chosenATag.match(/\btitle=["']([^"']+)["']/i);
