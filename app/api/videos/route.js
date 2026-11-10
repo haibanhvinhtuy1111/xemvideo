@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
+import vm from "vm";
 import data from "@/data/videos.json";
 import { siteConfig } from "@/config/site";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -105,7 +109,7 @@ async function fetchHtmlWithFallback(targetUrl, headers) {
 
 function decodeBase64Safe(str = "") {
   try {
-    const cleaned = str.trim().replace(/\s+/g, "");
+    const cleaned = String(str).trim().replace(/\s+/g, "");
     const decoded = Buffer.from(cleaned, "base64").toString("utf-8").trim();
     if (decoded && !/[\x00-\x08\x0E-\x1F]/.test(decoded)) {
       return decoded;
@@ -129,7 +133,6 @@ function isStaticAsset(url = "") {
   );
 }
 
-// Chặn các link bài viết/menu nội bộ của hệ thống viet69 để không bị nhúng nhầm trang 404
 function isViet69PageLink(url = "", baseHost = "") {
   try {
     const u = new URL(url);
@@ -143,7 +146,7 @@ function isViet69PageLink(url = "", baseHost = "") {
 
 function normalizeUrl(raw = "", baseDomain = "", baseHost = "") {
   if (!raw) return "";
-  let u = raw
+  let u = String(raw)
     .trim()
     .replace(/\\\//g, "/")
     .replace(/&amp;/g, "&")
@@ -164,7 +167,7 @@ function normalizeUrl(raw = "", baseDomain = "", baseHost = "") {
   return u;
 }
 
-// Bóc tách danh sách các nút <button class="video2-btn" data-type="..." data-video="...">
+// Bóc tách các nút <button class="video2-btn" data-type="..." data-video="...">
 function extractViet69Buttons(html = "") {
   const servers = [];
   const btnRegex =
@@ -186,11 +189,33 @@ function extractViet69Buttons(html = "") {
       });
     }
   }
+
+  // Nếu không có nút .video2-btn nhưng có thẻ .movieLoader chứa sẵn data-movie
+  if (servers.length === 0) {
+    const loaderMatch = html.match(
+      /<div[^>]*class=["'][^"']*movieLoader[^"']*["'][^>]*>/i
+    );
+    if (loaderMatch) {
+      const tag = loaderMatch[0];
+      const videoMatch = tag.match(/\bdata-(?:movie|video)=["']([^"']+)["']/i);
+      const typeMatch = tag.match(/\bdata-type=["']([^"']+)["']/i);
+      if (videoMatch && videoMatch[1]) {
+        const rawVideo = videoMatch[1].trim();
+        servers.push({
+          label: "Server #1",
+          dataType: typeMatch ? typeMatch[1].trim() : "1",
+          rawVideo,
+          decodedVideo: decodeBase64Safe(rawVideo) || rawVideo
+        });
+      }
+    }
+  }
+
   return servers;
 }
 
-// Quét toàn bộ script (kể cả LiteSpeed Base64 và file .js ngoài) để tìm hàm xử lý video2-btn
-async function findVideo2Script(html = "", baseDomain = "", reqHeaders = {}) {
+// Thu thập tất cả script có liên quan tới playCoverVideo / movieLoader / video2-btn
+async function collectPlayerScripts(html = "", baseDomain = "", reqHeaders = {}) {
   const inlineChunks = [];
   const externalUrls = [];
 
@@ -200,7 +225,6 @@ async function findVideo2Script(html = "", baseDomain = "", reqHeaders = {}) {
     const attrs = m[1] || "";
     const body = m[2] || "";
 
-    // Kiểm tra script mã hóa Base64 của LiteSpeed (data:text/javascript;base64,...)
     const b64SrcMatch = attrs.match(
       /(?:data-src|src)\s*=\s*["']data:text\/javascript;base64,([^"']+)["']/i
     );
@@ -210,7 +234,6 @@ async function findVideo2Script(html = "", baseDomain = "", reqHeaders = {}) {
       continue;
     }
 
-    // Kiểm tra script file .js bên ngoài
     const srcMatch = attrs.match(/(?:data-src|src)\s*=\s*["']([^"']+)["']/i);
     if (srcMatch && srcMatch[1]) {
       let sUrl = srcMatch[1].trim();
@@ -219,7 +242,8 @@ async function findVideo2Script(html = "", baseDomain = "", reqHeaders = {}) {
       if (
         sUrl.startsWith("http") &&
         !IGNORE_DOMAINS.some((d) => sUrl.includes(d)) &&
-        !sUrl.includes("jquery.min.js")
+        !sUrl.includes("jquery.min.js") &&
+        !sUrl.includes("wp-emoji")
       ) {
         externalUrls.push(sUrl);
       }
@@ -230,83 +254,856 @@ async function findVideo2Script(html = "", baseDomain = "", reqHeaders = {}) {
     }
   }
 
-  for (const chunk of inlineChunks) {
-    if (chunk.includes("video2-btn") || chunk.includes("data-video")) {
-      return chunk;
-    }
-  }
-
-  // Tải song song tối đa 6 file JS của theme/LiteSpeed để tìm đoạn xử lý video2-btn
-  const results = await Promise.allSettled(
-    externalUrls.slice(0, 6).map(async (u) => {
-      const r = await fetchWithTimeout(u, { headers: reqHeaders }, 4500);
-      return r.ok ? await r.text() : "";
-    })
+  const relevantScripts = inlineChunks.filter(
+    (c) =>
+      c.includes("playCoverVideo") ||
+      c.includes("movieLoader") ||
+      c.includes("video2-btn") ||
+      c.includes("admin-ajax.php")
   );
 
-  for (const res of results) {
-    if (
-      res.status === "fulfilled" &&
-      res.value &&
-      (res.value.includes("video2-btn") || res.value.includes("data-video"))
-    ) {
-      return res.value;
+  // Kiểm tra xem đã có hàm định nghĩa playCoverVideo chưa; nếu nằm ở file JS ngoài thì tải về
+  const hasPlayCoverDef = relevantScripts.some(
+    (c) =>
+      /function\s+playCoverVideo/.test(c) ||
+      /playCoverVideo\s*=/.test(c) ||
+      (c.includes("playCoverVideo") && c.includes("_0x"))
+  );
+
+  if (!hasPlayCoverDef && externalUrls.length > 0) {
+    const fetched = await Promise.allSettled(
+      externalUrls.slice(0, 8).map(async (u) => {
+        const r = await fetchWithTimeout(u, { headers: reqHeaders }, 4500);
+        return r.ok ? await r.text() : "";
+      })
+    );
+    for (const res of fetched) {
+      if (
+        res.status === "fulfilled" &&
+        res.value &&
+        (res.value.includes("playCoverVideo") ||
+          res.value.includes("movieLoader") ||
+          res.value.includes("video2-btn"))
+      ) {
+        relevantScripts.unshift(res.value);
+      }
     }
   }
 
-  return "";
+  return relevantScripts;
 }
 
-// Giải mã URL nhúng từ script xử lý video2-btn theo từng data-type
-function buildUrlFromHandlerJs(jsText = "", dataType = "", decodedVideo = "", rawVideo = "") {
-  if (!jsText) return "";
-  const cleanJs = jsText.replace(/\\\//g, "/");
+// Chạy trực tiếp script playCoverVideo của Viet69 trong VM Sandbox để lấy link iframe / m3u8 thật
+async function runViet69Sandbox({
+  scripts = [],
+  servers = [],
+  postLink = "",
+  baseDomain = "",
+  baseHost = "",
+  postId = "",
+  reqHeaders = {}
+}) {
+  const resolvedSources = [];
+  let debugSnippet = "";
 
-  // 1. Tìm nhánh điều kiện khớp với dataType (ví dụ: type == 25, case 25:, case "25":)
-  const escapedType = dataType.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const branchPatterns = [
+  if (scripts.length === 0 || servers.length === 0) {
+    return { resolvedSources, debugSnippet };
+  }
+
+  const state = {
+    attrs: {
+      "data-movie": servers[0]?.rawVideo || "",
+      "data-video": servers[0]?.rawVideo || "",
+      "data-type": String(servers[0]?.dataType || "1"),
+      "data-id": String(postId || "")
+    },
+    currentBtnAttrs: {
+      "data-video": servers[0]?.rawVideo || "",
+      "data-type": String(servers[0]?.dataType || "1")
+    },
+    outputs: [],
+    ajaxCalls: [],
+    clickHandlers: [],
+    readyCallbacks: []
+  };
+
+  const recordOutput = (val) => {
+    if (!val) return;
+    if (typeof val === "string") {
+      state.outputs.push(val);
+    } else if (typeof val === "object") {
+      if (val.src) state.outputs.push(String(val.src));
+      if (val.file) state.outputs.push(String(val.file));
+      if (val.innerHTML) state.outputs.push(String(val.innerHTML));
+      if (val.outerHTML) state.outputs.push(String(val.outerHTML));
+    }
+  };
+
+  const makeJqObject = (selector) => {
+    const isBtn =
+      selector === "this" ||
+      (typeof selector === "string" && selector.includes("video2-btn"));
+
+    const obj = {
+      length: 1,
+      0: {
+        tagName: "DIV",
+        innerHTML: "",
+        style: {},
+        dataset: new Proxy(
+          {},
+          {
+            get: (_, prop) => {
+              const key = `data-${String(prop).toLowerCase()}`;
+              return isBtn ? state.currentBtnAttrs[key] : state.attrs[key];
+            },
+            set: (_, prop, val) => {
+              const key = `data-${String(prop).toLowerCase()}`;
+              state.attrs[key] = String(val);
+              return true;
+            }
+          }
+        ),
+        getAttribute: (name) =>
+          isBtn ? state.currentBtnAttrs[name] : state.attrs[name],
+        setAttribute: (name, val) => {
+          state.attrs[name] = String(val);
+          if (name === "src" || name === "data-src") recordOutput(val);
+        }
+      },
+      attr(name, val) {
+        if (arguments.length === 1) {
+          if (isBtn) {
+            return (
+              state.currentBtnAttrs[name] ??
+              state.attrs[name] ??
+              ""
+            );
+          }
+          if (name === "data-movie" || name === "data-video") {
+            return state.attrs["data-movie"] || state.attrs["data-video"] || "";
+          }
+          return state.attrs[name] ?? "";
+        }
+        state.attrs[name] = String(val ?? "");
+        if (name === "data-video") state.attrs["data-movie"] = String(val ?? "");
+        if (name === "src" || name === "data-src" || name === "file") {
+          recordOutput(val);
+        }
+        return obj;
+      },
+      data(name, val) {
+        const key = `data-${name}`;
+        if (arguments.length === 1) {
+          return obj.attr(key);
+        }
+        return obj.attr(key, val);
+      },
+      prop(name, val) {
+        if (arguments.length >= 2 && name === "src") recordOutput(val);
+        return obj;
+      },
+      val(v) {
+        return arguments.length === 0 ? "" : obj;
+      },
+      html(val) {
+        if (arguments.length === 0) {
+          return state.outputs[state.outputs.length - 1] || "";
+        }
+        recordOutput(val);
+        return obj;
+      },
+      text() {
+        return obj;
+      },
+      append(val) {
+        recordOutput(val);
+        return obj;
+      },
+      prepend(val) {
+        recordOutput(val);
+        return obj;
+      },
+      replaceWith(val) {
+        recordOutput(val);
+        return obj;
+      },
+      find(subSel) {
+        if (typeof subSel === "string" && subSel.includes("video2-btn")) {
+          return makeJqObject(".video2-btn");
+        }
+        return obj;
+      },
+      first() {
+        return obj;
+      },
+      last() {
+        return obj;
+      },
+      eq() {
+        return obj;
+      },
+      parent() {
+        return obj;
+      },
+      parents() {
+        return [obj, obj, obj];
+      },
+      children() {
+        return obj;
+      },
+       closest() {
+        return obj;
+      },
+       siblings() {
+        return obj;
+      },
+      addClass() {
+        return obj;
+      },
+      removeClass() {
+        return obj;
+      },
+      toggleClass() {
+        return obj;
+      },
+      removeAttr() {
+        return obj;
+      },
+      css() {
+        return obj;
+      },
+      show() {
+        return obj;
+      },
+      hide() {
+        return obj;
+      },
+      slideToggle() {
+        return obj;
+      },
+      fadeIn() {
+        return obj;
+      },
+      fadeOut() {
+        return obj;
+      },
+      empty() {
+        return obj;
+      },
+      remove() {
+        return obj;
+      },
+      click(fn) {
+        if (typeof fn === "function" && isBtn) {
+          state.clickHandlers.push(fn);
+        }
+        return obj;
+      },
+      on(evt, selOrFn, maybeFn) {
+        const fn = typeof maybeFn === "function" ? maybeFn : selOrFn;
+        if (typeof evt === "string" && evt.includes("click") && typeof fn === "function") {
+          state.clickHandlers.push(fn);
+        }
+        return obj;
+      },
+      ready(fn) {
+        if (typeof fn === "function") state.readyCallbacks.push(fn);
+        return obj;
+      },
+      each(fn) {
+        if (typeof fn === "function") {
+          try {
+            fn.call(obj, 0, obj[0]);
+          } catch (_) {}
+        }
+        return obj;
+      }
+    };
+    return obj;
+  };
+
+  const jq = function (sel, ctx) {
+    if (typeof sel === "function") {
+      state.readyCallbacks.push(sel);
+      return makeJqObject("document");
+    }
+    if (typeof sel === "string" && sel.trim().startsWith("<")) {
+      recordOutput(sel);
+      if (ctx && typeof ctx === "object" && ctx.src) {
+        recordOutput(ctx.src);
+      }
+    }
+    if (sel && sel.__isBtnMock) {
+      return makeJqObject("this");
+    }
+    return makeJqObject(typeof sel === "string" ? sel : "element");
+  };
+
+  jq.ajax = function (urlOrOpts, maybeOpts) {
+    const opts =
+      typeof urlOrOpts === "string"
+        ? { url: urlOrOpts, ...(maybeOpts || {}) }
+        : urlOrOpts || {};
+    state.ajaxCalls.push(opts);
+    return {
+      done(cb) {
+        opts._done = cb;
+        return this;
+      },
+      fail() {
+        return this;
+      },
+      always() {
+        return this;
+      },
+      then(cb) {
+        opts._done = cb;
+        return this;
+      }
+    };
+  };
+
+  jq.post = function (url, data, success) {
+    const cb = typeof data === "function" ? data : success;
+    const payload = typeof data === "function" ? {} : data;
+    return jq.ajax({ url, type: "POST", data: payload, success: cb });
+  };
+
+  jq.get = function (url, data, success) {
+    const cb = typeof data === "function" ? data : success;
+    const payload = typeof data === "function" ? {} : data;
+    return jq.ajax({ url, type: "GET", data: payload, success: cb });
+  };
+
+  jq.getJSON = jq.get;
+  jq.fn = {};
+  jq.extend = Object.assign;
+
+  const locationMock = {
+    href: postLink,
+    origin: baseDomain,
+    protocol: "https:",
+    host: baseHost,
+    hostname: baseHost,
+    pathname: new URL(postLink).pathname,
+    search: "",
+    hash: "",
+    assign(u) {
+      recordOutput(u);
+    },
+    replace(u) {
+      recordOutput(u);
+    },
+    reload() {},
+    toString() {
+      return postLink;
+    }
+  };
+
+  const domEvents = [];
+  const addEventListenerMock = (evt, fn) => {
+    if (typeof fn === "function") {
+      domEvents.push({ evt, fn });
+    }
+  };
+
+  const documentMock = {
+    domain: baseHost,
+    URL: postLink,
+    documentURI: postLink,
+    referrer: `${baseDomain}/`,
+    title: "",
+    cookie: "",
+    readyState: "complete",
+    location: locationMock,
+    addEventListener: addEventListenerMock,
+    removeEventListener() {},
+    createElement(tag) {
+      const el = {
+        tagName: String(tag).toUpperCase(),
+        style: {},
+        dataset: {},
+        setAttribute(k, v) {
+          this[k] = v;
+          if (k === "src" || k === "data-src" || k === "href") recordOutput(v);
+        },
+        getAttribute(k) {
+          return this[k] || "";
+        },
+        appendChild(child) {
+          recordOutput(child);
+          return child;
+        }
+      };
+      return new Proxy(el, {
+        set(target, prop, value) {
+          target[prop] = value;
+          if (
+            prop === "src" ||
+            prop === "innerHTML" ||
+            prop === "outerHTML" ||
+            prop === "file"
+          ) {
+            recordOutput(value);
+          }
+          return true;
+        }
+      });
+    },
+    getElementById() {
+      return makeJqObject(".movieLoader")[0];
+    },
+    querySelector() {
+      return makeJqObject(".movieLoader")[0];
+    },
+    querySelectorAll() {
+      return [makeJqObject(".movieLoader")[0]];
+    },
+    getElementsByClassName() {
+      return [makeJqObject(".movieLoader")[0]];
+    },
+    getElementsByTagName() {
+      return [makeJqObject(".movieLoader")[0]];
+    },
+    write(str) {
+      recordOutput(str);
+    },
+    body: {
+      appendChild(c) {
+        recordOutput(c);
+      },
+      removeChild() {},
+      style: {}
+    },
+    head: {
+      appendChild(c) {
+        recordOutput(c);
+      },
+      removeChild() {}
+    },
+    documentElement: { style: {} }
+  };
+
+  const sandbox = {
+    console: { log() {}, warn() {}, error() {}, info() {}, debug() {}, clear() {} },
+    location: locationMock,
+    document: documentMock,
+    navigator: {
+      userAgent: BROWSER_HEADERS["User-Agent"],
+      language: "vi-VN",
+      languages: ["vi-VN", "vi", "en-US", "en"],
+      platform: "Win32",
+      webdriver: false
+    },
+    screen: { width: 1920, height: 1080 },
+    history: { pushState() {}, replaceState() {} },
+    localStorage: {
+      getItem() {
+        return null;
+      },
+      setItem() {},
+      removeItem() {}
+    },
+    sessionStorage: {
+      getItem() {
+        return null;
+      },
+      setItem() {},
+      removeItem() {}
+    },
+    jQuery: jq,
+    $: jq,
+    atob: (b64) => decodeBase64Safe(b64),
+    btoa: (str) => Buffer.from(String(str), "utf-8").toString("base64"),
+    setTimeout: (fn, ms) => {
+      // Chỉ chạy ngay các callback ngắn (bỏ qua timer 5000ms khóa nút của Viet69)
+      if (typeof fn === "function" && (!ms || ms < 1000)) {
+        try {
+          fn();
+        } catch (_) {}
+      }
+      return 1;
+    },
+    clearTimeout() {},
+    setInterval: () => 1,
+    clearInterval() {},
+    requestAnimationFrame: (fn) => {
+      if (typeof fn === "function") {
+        try {
+          fn();
+        } catch (_) {}
+      }
+      return 1;
+    },
+    addEventListener: addEventListenerMock,
+    removeEventListener() {},
+    fetch: (url, opts = {}) => {
+      state.ajaxCalls.push({
+        url,
+        type: opts.method || "GET",
+        data: opts.body,
+        headers: opts.headers
+      });
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve("")
+      });
+    },
+    XMLHttpRequest: function () {
+      const req = { url: "", type: "GET", data: null };
+      this.open = (method, url) => {
+        req.type = method;
+        req.url = url;
+      };
+      this.setRequestHeader = () => {};
+      this.send = (body) => {
+        req.data = body;
+        req.success = (res) => {
+          this.responseText = typeof res === "string" ? res : JSON.stringify(res);
+          this.status = 200;
+          this.readyState = 4;
+          if (typeof this.onload === "function") this.onload();
+          if (typeof this.onreadystatechange === "function")
+            this.onreadystatechange();
+        };
+        state.ajaxCalls.push(req);
+      };
+    },
+    jwplayer: () => ({
+      setup(cfg) {
+        recordOutput(JSON.stringify(cfg));
+        return this;
+      },
+      on() {
+        return this;
+      },
+      load() {
+        return this;
+      },
+      play() {
+        return this;
+      }
+    }),
+    Hls: function () {
+      this.loadSource = (u) => recordOutput(u);
+      this.attachMedia = () => {};
+      this.on = () => {};
+    },
+    Plyr: function () {},
+    Artplayer: function (cfg) {
+      if (cfg && cfg.url) recordOutput(cfg.url);
+    },
+    Math,
+    Date,
+    JSON,
+    RegExp,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Error,
+    TypeError,
+    parseInt,
+    parseFloat,
+    isNaN,
+    isFinite,
+    encodeURIComponent,
+    decodeURIComponent,
+    encodeURI,
+    decodeURI,
+    escape,
+    unescape,
+    Map,
+    Set,
+    Promise,
+    Symbol,
+    Uint8Array
+  };
+
+  sandbox.window = sandbox;
+  sandbox.self = sandbox;
+  sandbox.top = sandbox;
+  sandbox.parent = sandbox;
+  sandbox.globalThis = sandbox;
+  sandbox.Hls.isSupported = () => true;
+
+  const context = vm.createContext(sandbox);
+
+  // Chạy từng script trong VM; mở khóa biến guard `if (!_0xa13qc9) return;` ở khối jQuery cuối
+  for (const rawScript of scripts) {
+    let codeToRun = rawScript;
+
+    // Đảm bảo có dấu chấm phẩy trước `(function($)` và ép biến khóa `_0xa13qc9 = true`
+    codeToRun = codeToRun.replace(
+      /\)\s*(\(function\s*\(\s*\$\s*\)\s*\{)/g,
+      ");\n$1"
+    );
+    codeToRun = codeToRun.replace(
+      /if\s*\(\s*!(_0x[a-zA-Z0-9_]+)\s*\)\s*return\s*;/g,
+      "try { $1 = true; } catch(_) {}"
+    );
+
+    try {
+      vm.runInContext(codeToRun, context, { timeout: 1200 });
+    } catch (_) {
+      // Nếu lỗi cú pháp do ghép块, thử chạy riêng phần định nghĩa trước `(function($)`
+      const splitIdx = codeToRun.indexOf("(function($)");
+      if (splitIdx > 0) {
+        try {
+          vm.runInContext(codeToRun.slice(0, splitIdx), context, {
+            timeout: 1000
+          });
+        } catch (_) {}
+        try {
+          vm.runInContext(codeToRun.slice(splitIdx), context, {
+            timeout: 1000
+          });
+        } catch (_) {}
+      }
+    }
+  }
+
+  // Kích hoạt toàn bộ callback DOMContentLoaded / load / jQuery.ready đã đăng ký
+  for (const ev of domEvents) {
+    try {
+      ev.fn({
+        type: ev.evt,
+        target: documentMock,
+        currentTarget: sandbox
+      });
+    } catch (_) {}
+  }
+  for (const rcb of state.readyCallbacks) {
+    try {
+      rcb(jq);
+    } catch (_) {}
+  }
+
+  // Tự động giải mã mã nguồn playCoverVideo bằng các hàm _0x... đã nạp trong VM (phục vụ cả debug & fallback)
+  for (const s of scripts) {
+    if (s.includes("playCoverVideo") || s.includes("video2-btn")) {
+      let readable = s;
+      try {
+        // Tìm các cặp alias `const _0x... = _0x...`
+        const aliasMap = {};
+        const aliasRegex = /\b(_0x[a-f0-9]+)\s*=\s*(_0x[a-f0-9]+)\b/gi;
+        let am;
+        while ((am = aliasRegex.exec(s)) !== null) {
+          aliasMap[am[1]] = am[2];
+        }
+        const resolveFn = (name) => {
+          let cur = name;
+          for (let i = 0; i < 6; i++) {
+            if (typeof sandbox[cur] === "function") return sandbox[cur];
+            if (aliasMap[cur]) cur = aliasMap[cur];
+            else break;
+          }
+          return null;
+        };
+
+        readable = readable.replace(
+          /\b(_0x[a-f0-9]{4,})\(\s*(0x[a-f0-9]+|\d+)\s*\)/gi,
+          (full, fnName, argStr) => {
+            try {
+              const fn = resolveFn(fnName);
+              if (fn) {
+                const val = fn(Number(argStr));
+                if (typeof val === "string") return JSON.stringify(val);
+              }
+            } catch (_) {}
+            return full;
+          }
+        );
+      } catch (_) {}
+
+      const pIdx = readable.indexOf("function playCoverVideo");
+      const vIdx = readable.indexOf("playCoverVideo");
+      const start = pIdx !== -1 ? pIdx : vIdx !== -1 ? Math.max(0, vIdx - 300) : 0;
+      debugSnippet = readable.slice(start, start + 1400);
+    }
+  }
+
+  // Hàm phụ trích xuất URL từ chuỗi HTML/URL thu được
+  const extractUrlsFromOutputs = (outList) => {
+    const found = [];
+    const combined = outList.join("\n");
+    const media = extractMedia(combined, baseDomain, baseHost);
+    found.push(...media.streams, ...media.iframes);
+
+    for (const item of outList) {
+      const clean = normalizeUrl(item, baseDomain, baseHost);
+      if (clean && !found.includes(clean)) {
+        found.push(clean);
+      }
+    }
+    return found;
+  };
+
+  // Lặp qua từng nút Server #1, Server #2... và kích hoạt playCoverVideo
+  for (const srv of servers) {
+    state.outputs = [];
+    state.ajaxCalls = [];
+    state.attrs["data-movie"] = srv.rawVideo;
+    state.attrs["data-video"] = srv.rawVideo;
+    state.attrs["data-type"] = String(srv.dataType);
+    state.currentBtnAttrs["data-video"] = srv.rawVideo;
+    state.currentBtnAttrs["data-type"] = String(srv.dataType);
+
+    // 1. Gọi click handler của nút .video2-btn
+    for (const handler of state.clickHandlers) {
+      try {
+        handler.call({ __isBtnMock: true }, { preventDefault() {}, stopPropagation() {} });
+      } catch (_) {}
+    }
+
+    // 2. Gọi trực tiếp playCoverVideo('.movieLoader', 1) và ('.movieLoader', 0)
+    if (typeof sandbox.playCoverVideo === "function") {
+      try {
+        sandbox.playCoverVideo(".movieLoader", 1);
+      } catch (_) {}
+      if (state.outputs.length === 0 && state.ajaxCalls.length === 0) {
+        try {
+          sandbox.playCoverVideo(".movieLoader", 0);
+        } catch (_) {}
+      }
+    }
+
+    // 3. Nếu playCoverVideo thực hiện gọi AJAX, thực thi request thật và truyền kết quả vào callback
+    if (state.outputs.length === 0 && state.ajaxCalls.length > 0) {
+      for (const req of state.ajaxCalls.slice(0, 3)) {
+        try {
+          let ajaxUrl = req.url || `${baseDomain}/wp-admin/admin-ajax.php`;
+          if (ajaxUrl.startsWith("//")) ajaxUrl = `https:${ajaxUrl}`;
+          else if (ajaxUrl.startsWith("/")) ajaxUrl = `${baseDomain}${ajaxUrl}`;
+
+          const method = (req.type || req.method || "POST").toUpperCase();
+          let bodyStr = "";
+          if (req.data) {
+            if (typeof req.data === "string") {
+              bodyStr = req.data;
+            } else if (typeof req.data === "object") {
+              bodyStr = new URLSearchParams(req.data).toString();
+            }
+          }
+
+          const fetchUrl =
+            method === "GET" && bodyStr
+              ? `${ajaxUrl}${ajaxUrl.includes("?") ? "&" : "?"}${bodyStr}`
+              : ajaxUrl;
+
+          const ajaxRes = await fetchWithTimeout(
+            fetchUrl,
+            {
+              method,
+              headers: {
+                ...reqHeaders,
+                ...(method === "POST"
+                  ? {
+                      "Content-Type":
+                        "application/x-www-form-urlencoded; charset=UTF-8"
+                    }
+                  : {}),
+                "X-Requested-With": "XMLHttpRequest"
+              },
+              ...(method === "POST" && bodyStr ? { body: bodyStr } : {})
+            },
+            5000
+          );
+
+          if (ajaxRes.ok) {
+            const resText = await ajaxRes.text();
+            state.outputs.push(resText);
+            let parsed = resText;
+            try {
+              parsed = JSON.parse(resText);
+            } catch (_) {}
+            if (typeof req.success === "function") {
+              try {
+                req.success(parsed);
+              } catch (_) {}
+            }
+            if (typeof req._done === "function") {
+              try {
+                req._done(parsed);
+              } catch (_) {}
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    // 4. Nếu trong debugSnippet (đã giải mã _0x...) có mẫu URL theo data-type mà VM chưa bắt được
+    if (state.outputs.length === 0 && debugSnippet) {
+      const built = buildUrlFromDecodedSnippet(
+        debugSnippet,
+        srv.dataType,
+        srv.decodedVideo,
+        srv.rawVideo
+      );
+      if (built) state.outputs.push(built);
+    }
+
+    const urls = extractUrlsFromOutputs(state.outputs);
+    for (const u of urls) {
+      const isStream = u.includes(".m3u8") || u.includes(".mp4");
+      resolvedSources.push({
+        label: srv.label,
+        name: srv.label,
+        url: u,
+        src: u,
+        type: isStream ? (u.includes(".m3u8") ? "hls" : "mp4") : "iframe"
+      });
+    }
+  }
+
+  return { resolvedSources, debugSnippet };
+}
+
+function buildUrlFromDecodedSnippet(
+  decodedJs = "",
+  dataType = "",
+  decodedVideo = "",
+  rawVideo = ""
+) {
+  if (!decodedJs) return "";
+  const cleanJs = decodedJs.replace(/\\\//g, "/");
+  const numType = parseInt(dataType, 10);
+  const hexType = !isNaN(numType) ? `0x${numType.toString(16)}` : "";
+
+  const patterns = [
     new RegExp(
-      `(?:case\\s*["']?${escapedType}["']?\\s*:|type\\s*===?\\s*["']?${escapedType}["']?)[\\s\\S]{0,450}`,
-      "i"
-    ),
-    new RegExp(
-      `["']?${escapedType}["']?\\s*:\\s*["'](https?:\\/\\/[^"']+)["']`,
+      `(?:case\\s*(?:["']?${dataType}["']?|${hexType || dataType})\\s*:|===?\\s*(?:["']?${dataType}["']?|${hexType || dataType}))[\\s\\S]{0,500}`,
       "i"
     )
   ];
 
-  for (const pat of branchPatterns) {
-    const bm = cleanJs.match(pat);
-    if (bm) {
-      const block = bm[0];
-      // Tách tiền tố URL (https://...) và hậu tố (nếu có) trong nhánh này
-      const urlMatch = block.match(/["'`](https?:\/\/[^"'`\s+$]+)["'`]/i);
-      if (urlMatch && urlMatch[1]) {
-        const prefix = urlMatch[1];
-        const usesRaw = !/atob|base64/i.test(cleanJs);
-        const token = usesRaw ? rawVideo : decodedVideo;
-        // Kiểm tra xem sau biến có nối thêm đuôi (như .m3u8, .html, /embed) không
-        const afterPrefix = block.slice(block.indexOf(prefix) + prefix.length);
-        const suffixMatch = afterPrefix.match(/\+\s*["'`](\/[^"'`<>\s]+|\.m3u8[^"'`<>\s]*|\.html[^"'`<>\s]*)["'`]/i);
-        const suffix = suffixMatch ? suffixMatch[1] : "";
+  for (const pat of patterns) {
+    const m = cleanJs.match(pat);
+    if (m) {
+      const block = m[0];
+      const uMatch = block.match(/["'`](https?:\/\/[^"'`\s+$]+)["'`]/i);
+      if (uMatch && uMatch[1]) {
+        const prefix = uMatch[1];
+        const after = block.slice(block.indexOf(prefix) + prefix.length);
+        const suffixM = after.match(
+          /\+\s*["'`](\/[^"'`<>\s]+|\.m3u8[^"'`<>\s]*|\.mp4[^"'`<>\s]*|\.html[^"'`<>\s]*)["'`]/i
+        );
+        const suffix = suffixM ? suffixM[1] : "";
+        const token = decodedVideo.includes("-") ? decodedVideo : rawVideo;
         return `${prefix}${token}${suffix}`;
       }
     }
   }
 
-  // 2. Nếu trong hàm xử lý video2-btn chỉ có 1 mẫu URL nhúng chung
-  const idx = cleanJs.indexOf("video2-btn");
-  const windowJs =
-    idx !== -1
-      ? cleanJs.slice(Math.max(0, idx - 600), idx + 1500)
-      : cleanJs.slice(0, 2000);
-
-  const genericUrlMatch = windowJs.match(
-    /["'`](https?:\/\/(?![^"'`]*viet69)[^"'`\s+$]+\/(?:embed|e|v|play|player|watch)\/?)["'`]/i
+  const anyEmbed = cleanJs.match(
+    /["'`](https?:\/\/(?![^"'`]*viet69)[^"'`\s+$]+)["'`]/i
   );
-  if (genericUrlMatch && genericUrlMatch[1]) {
-    const prefix = genericUrlMatch[1].replace(/\/+$/, "");
-    return `${prefix}/${decodedVideo}`;
+  if (anyEmbed && anyEmbed[1]) {
+    const base = anyEmbed[1].replace(/\/+$/, "");
+    return `${base}/${decodedVideo}`;
   }
 
   return "";
@@ -315,7 +1112,7 @@ function buildUrlFromHandlerJs(jsText = "", dataType = "", decodedVideo = "", ra
 function extractMedia(html = "", baseDomain = "", baseHost = "") {
   if (!html) return { streams: [], iframes: [] };
 
-  let buffer = html
+  const buffer = String(html)
     .replace(/\\\//g, "/")
     .replace(/\\u0026/gi, "&")
     .replace(/&amp;/g, "&");
@@ -350,7 +1147,7 @@ function extractMedia(html = "", baseDomain = "", baseHost = "") {
 
     if (
       isIframeTag ||
-      /(?:\/embed\/|\/e\/|\/v\/|\/play\/|\/player\/|player\.|embed\.|hydrax|abyss|dood|ok\.ru|helvid|vhstream|goostream|cd-vs)/i.test(
+      /(?:\/embed|\/e\/|\/v\/|\/play|\/player|player\.|embed\.|hydrax|abyss|dood|ok\.ru|helvid|vhstream|goostream|cd-vs)/i.test(
         lower
       )
     ) {
@@ -358,7 +1155,8 @@ function extractMedia(html = "", baseDomain = "", baseHost = "") {
     }
   };
 
-  const embedTags = buffer.match(/<(?:iframe|embed|source)\b[^>]*>/gi) || [];
+  const embedTags =
+    buffer.match(/<(?:iframe|embed|video|source)\b[^>]*>/gi) || [];
   const attrs = [
     "data-litespeed-src",
     "data-lazy-src",
@@ -429,7 +1227,6 @@ export async function GET(req) {
     );
   }
 
-  // Chuẩn hóa baseDomain an toàn, không bao giờ gây lỗi Invalid URL
   let baseDomain = (sp.get("domain") || DEFAULT_DOMAIN).trim();
   if (!/^https?:\/\//i.test(baseDomain)) {
     baseDomain = `https://${baseDomain}`;
@@ -487,96 +1284,42 @@ export async function GET(req) {
         );
         if (ogImg) thumbnail = ogImg[1];
 
-        // 1. Quét media trực tiếp trong trang
+        // 1. Quét media tĩnh có sẵn trong HTML
         const media = extractMedia(pageHtml, baseDomain, baseHost);
         allStreams.push(...media.streams);
         allIframes.push(...media.iframes);
 
-        // 2. Bóc tách các nút Server (.video2-btn) và tìm script xử lý chúng
+        // 2. Bóc tách nút .video2-btn và chạy playCoverVideo trong VM Sandbox
         const servers = extractViet69Buttons(pageHtml);
         debugInfo.servers = servers;
 
         if (servers.length > 0) {
-          const handlerJs = await findVideo2Script(
+          const playerScripts = await collectPlayerScripts(
             pageHtml,
             baseDomain,
             reqHeaders
           );
 
-          if (handlerJs) {
-            const idx = handlerJs.indexOf("video2-btn");
-            debugInfo.playerSnippet =
-              idx !== -1
-                ? handlerJs.slice(Math.max(0, idx - 200), idx + 800)
-                : handlerJs.slice(0, 800);
-          } else {
-            // Lưu 600 ký tự quanh nút video2-btn để kiểm tra nếu chưa thấy script
-            const btnIdx = pageHtml.indexOf("video2-btn");
-            if (btnIdx !== -1) {
-              debugInfo.playerSnippet = pageHtml.slice(
-                Math.max(0, btnIdx - 200),
-                btnIdx + 600
-              );
-            }
+          const { resolvedSources, debugSnippet } = await runViet69Sandbox({
+            scripts: playerScripts,
+            servers,
+            postLink,
+            baseDomain,
+            baseHost,
+            postId,
+            reqHeaders
+          });
+
+          if (debugSnippet) {
+            debugInfo.playerSnippet = debugSnippet;
           }
 
-          for (const srv of servers) {
-            const vid = srv.decodedVideo;
-
-            // Trường hợp 1: Chuỗi sau giải mã Base64 đã là URL hoặc thẻ iframe
-            if (
-              vid.startsWith("http") ||
-              vid.startsWith("//") ||
-              vid.includes("<iframe")
-            ) {
-              const m = extractMedia(vid, baseDomain, baseHost);
-              const foundUrl =
-                m.streams[0] ||
-                m.iframes[0] ||
-                (vid.startsWith("http") ? vid : "");
-              if (foundUrl) {
-                const isStream =
-                  foundUrl.includes(".m3u8") || foundUrl.includes(".mp4");
-                if (isStream) allStreams.push(foundUrl);
-                else allIframes.push(foundUrl);
-                customSources.push({
-                  label: srv.label,
-                  name: srv.label,
-                  url: foundUrl,
-                  src: foundUrl,
-                  type: isStream
-                    ? foundUrl.includes(".m3u8")
-                      ? "hls"
-                      : "mp4"
-                    : "iframe"
-                });
-                continue;
-              }
-            }
-
-            // Trường hợp 2: Dựng URL từ hàm JS xử lý video2-btn của Viet69
-            const builtFromJs = buildUrlFromHandlerJs(
-              handlerJs,
-              srv.dataType,
-              srv.decodedVideo,
-              srv.rawVideo
-            );
-            if (builtFromJs) {
-              const isStream =
-                builtFromJs.includes(".m3u8") || builtFromJs.includes(".mp4");
-              if (isStream) allStreams.push(builtFromJs);
-              else allIframes.push(builtFromJs);
-              customSources.push({
-                label: srv.label,
-                name: srv.label,
-                url: builtFromJs,
-                src: builtFromJs,
-                type: isStream
-                  ? builtFromJs.includes(".m3u8")
-                    ? "hls"
-                    : "mp4"
-                  : "iframe"
-              });
+          for (const srcItem of resolvedSources) {
+            customSources.push(srcItem);
+            if (srcItem.type === "iframe") {
+              allIframes.push(srcItem.url);
+            } else {
+              allStreams.push(srcItem.url);
             }
           }
         }
