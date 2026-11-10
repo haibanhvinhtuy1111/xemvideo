@@ -79,7 +79,7 @@ export default function Player({
     setUseBackupMode(false);
   }, [activeIdx]);
 
-  // Hàm tự động nhảy sang Server kế tiếp nếu Server hiện tại bị lỗi
+  // Tự động chuyển server khi gặp sự cố
   const handleAutoSwitchNext = () => {
     if (!useBackupMode && backupUrl && backupUrl !== primaryUrl) {
       setUseBackupMode(true);
@@ -159,7 +159,7 @@ export default function Player({
 
   if (!activeUrl) {
     return (
-      <div className="p-6 rounded-2xl bg-slate-900/70 border border-slate-800 text-slate-300 space-y-3">
+      <div className="space-y-3 rounded-2xl border border-border bg-surface p-6 text-textSub shadow-sm">
         <p className="text-sm">
           Video này hiện không có luồng phát khả dụng hoặc đã bị xóa trên máy chủ nguồn.
         </p>
@@ -168,20 +168,20 @@ export default function Player({
             href={video.postLink}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 px-4 py-2 text-xs font-semibold text-white transition"
+            className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition hover:bg-primary-hover"
           >
             <span>Kiểm tra trên trang gốc</span>
             <span>↗</span>
           </a>
         )}
         {video?._debug && (
-          <div className="text-xs text-slate-500 font-mono space-y-1 pt-2 border-t border-slate-800">
+          <div className="space-y-1 border-t border-border pt-2 font-mono text-xs text-textSub">
             <p>
               Domain: {video._debug.baseDomain} | HTML: {video._debug.htmlVia} (
               {video._debug.htmlLength || 0} bytes)
             </p>
             {video._debug.playerSnippet && (
-              <pre className="p-2 bg-slate-950 rounded-lg overflow-x-auto whitespace-pre-wrap text-[11px] text-slate-400">
+              <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-border bg-sub p-2.5 text-[11px] text-textMain">
                 {video._debug.playerSnippet}
               </pre>
             )}
@@ -195,13 +195,14 @@ export default function Player({
 
   return (
     <div className="space-y-3.5">
-      <div className="relative aspect-video w-full bg-black rounded-xl sm:rounded-2xl overflow-hidden border border-slate-800/90 shadow-xl shadow-black/40">
+      {/* Khung phát Video / Iframe */}
+      <div className="relative aspect-video w-full overflow-hidden rounded-xl border border-border bg-black shadow-xl shadow-black/25 sm:rounded-2xl">
         {activeType === "iframe" ? (
           <iframe
             key={activeUrl}
             src={activeUrl}
             scrolling="no"
-            className="w-full h-full border-0 overflow-hidden"
+            className="h-full w-full border-0 overflow-hidden"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
             allowFullScreen
             referrerPolicy={
@@ -217,47 +218,50 @@ export default function Player({
             autoPlay
             playsInline
             onError={handleAutoSwitchNext}
-            className="w-full h-full object-contain"
+            className="h-full w-full object-contain"
           />
         )}
       </div>
 
+      {/* Thông báo tự động đổi server */}
       {autoSwitchedMsg && (
-        <p className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-1.5">
+        <p className="rounded-xl border border-hot/30 bg-hot-bg px-3.5 py-2 text-xs font-medium text-hot">
           ⚡ {autoSwitchedMsg}
         </p>
       )}
 
-      {/* Hàng nút chọn Server & Công cụ đổi nhanh */}
+      {/* Hàng nút chọn Server & Nút chuyển nhanh */}
       <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
         <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-          <span className="text-xs text-slate-400 mr-1 hidden sm:inline">
+          <span className="mr-1 hidden text-xs font-medium text-textSub sm:inline">
             Máy chủ:
           </span>
-          {normalizedSources.map((s, idx) => (
-            <button
-              key={idx}
-              type="button"
-              onClick={() => {
-                setAutoSwitchedMsg("");
-                setActiveIdx(idx);
-              }}
-              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${
-                activeIdx === idx
-                  ? "bg-indigo-500 text-white shadow-sm shadow-indigo-500/30"
-                  : "bg-slate-800/80 text-slate-300 hover:bg-slate-700 border border-slate-700/60"
-              }`}
-            >
-              {s.label || s.name || `Server #${idx + 1}`}
-            </button>
-          ))}
+          {normalizedSources.map((s, idx) => {
+            const isActive = activeIdx === idx;
+            return (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => {
+                  setAutoSwitchedMsg("");
+                  setActiveIdx(idx);
+                }}
+                className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition-all ${
+                  isActive
+                    ? "bg-primary text-primary-foreground shadow-sm shadow-primary/30"
+                    : "border border-border bg-sub text-textMain hover:bg-surface"
+                }`}
+              >
+                {s.label || s.name || `Server #${idx + 1}`}
+              </button>
+            );
+          })}
 
-          {/* Nút nhảy nhanh sang Server kế tiếp nếu người xem thấy quay lâu */}
           {normalizedSources.length > 1 && (
             <button
               type="button"
               onClick={handleAutoSwitchNext}
-              className="px-2.5 py-1.5 rounded-xl bg-slate-800/50 hover:bg-slate-800 border border-slate-700/50 text-xs text-indigo-300 transition"
+              className="rounded-xl border border-border bg-sub px-2.5 py-1.5 text-xs font-medium text-primary transition hover:bg-surface"
               title="Bấm nếu server hiện tại tải chậm"
             >
               Đổi Server ↻
@@ -268,24 +272,25 @@ export default function Player({
         <button
           type="button"
           onClick={() => setShowDebug(!showDebug)}
-          className="text-xs text-slate-500 hover:text-slate-300 underline py-1"
+          className="py-1 text-xs text-textSub underline transition-colors hover:text-textMain"
         >
           {showDebug ? "Ẩn chi tiết" : "🔍 Chi tiết nguồn"}
         </button>
       </div>
 
+      {/* Hộp debug chi tiết luồng phát */}
       {showDebug && (
-        <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 text-xs font-mono text-slate-400 space-y-1 overflow-x-auto">
-          <p className="text-slate-300 break-all">
+        <div className="space-y-1 overflow-x-auto rounded-xl border border-border bg-sub/80 p-3 font-mono text-xs text-textSub">
+          <p className="break-all text-textMain">
             Đang phát ({activeType}): {activeUrl}
           </p>
           {current?.rawUrl && (
-            <p className="text-emerald-400 break-all">
+            <p className="break-all text-success">
               Link gốc: {current.rawUrl}
             </p>
           )}
           {video?._debug?.playerSnippet && (
-            <pre className="p-2 bg-slate-950 rounded-lg whitespace-pre-wrap break-all text-[11px]">
+            <pre className="break-all whitespace-pre-wrap rounded-lg border border-border bg-surface p-2 text-[11px] text-textMain">
               {video._debug.playerSnippet}
             </pre>
           )}
