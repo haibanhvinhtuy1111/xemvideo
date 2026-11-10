@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import vm from "vm";
 import data from "@/data/videos.json";
 import { siteConfig } from "@/config/site";
 
@@ -8,7 +9,7 @@ export const dynamic = "force-dynamic";
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Range"
+  "Access-Control-Allow-Headers": "Content-Type, Range, X-Requested-With"
 };
 
 const DEFAULT_DOMAIN =
@@ -40,6 +41,7 @@ const IGNORE_DOMAINS = [
   "cdnjs.cloudflare.com",
   "fonts.googleapis.com",
   "fonts.gstatic.com",
+  "ajax.googleapis.com",
   "jquery.com"
 ];
 
@@ -59,7 +61,7 @@ function cleanText(str = "") {
     .trim();
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8500) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -155,6 +157,88 @@ function unpackPacker(html = "") {
   return unpacked;
 }
 
+// Giải mã script bị làm rối bằng _0x... trong trang nhúng emb.cd-vs.com
+function deobfuscateScriptWithVm(scriptCode = "") {
+  if (!scriptCode || !scriptCode.includes("_0x")) return scriptCode;
+  try {
+    const sandbox = {
+      atob: (b) => decodeBase64Safe(b),
+      btoa: (s) => Buffer.from(String(s), "utf-8").toString("base64"),
+      String,
+      Number,
+      Array,
+      Object,
+      Math,
+      Date,
+      RegExp,
+      JSON,
+      parseInt,
+      parseFloat,
+      decodeURIComponent,
+      encodeURIComponent,
+      escape,
+      unescape
+    };
+    sandbox.window = sandbox;
+    sandbox.self = sandbox;
+    sandbox.globalThis = sandbox;
+    const ctx = vm.createContext(sandbox);
+
+    // Chạy phần đầu của script (chứa mảng từ điển và hàm giải mã _0x...)
+    const splitPoints = [
+      scriptCode.indexOf("$(document)"),
+      scriptCode.indexOf("jQuery("),
+      scriptCode.indexOf("new Plyr"),
+      scriptCode.indexOf("new Hls"),
+      scriptCode.indexOf("$.ajax"),
+      scriptCode.indexOf("fetch(")
+    ].filter((idx) => idx > 50);
+
+    const cutIdx =
+      splitPoints.length > 0 ? Math.min(...splitPoints) : scriptCode.length;
+    try {
+      vm.runInContext(scriptCode.slice(0, cutIdx), ctx, { timeout: 600 });
+    } catch (_) {
+      try {
+        vm.runInContext(scriptCode, ctx, { timeout: 600 });
+      } catch (_) {}
+    }
+
+    const aliasMap = {};
+    const aliasRegex = /\b(_0x[a-f0-9]+)\s*=\s*(_0x[a-f0-9]+)\b/gi;
+    let am;
+    while ((am = aliasRegex.exec(scriptCode)) !== null) {
+      aliasMap[am[1]] = am[2];
+    }
+
+    const resolveFn = (name) => {
+      let cur = name;
+      for (let i = 0; i < 6; i++) {
+        if (typeof sandbox[cur] === "function") return sandbox[cur];
+        if (aliasMap[cur]) cur = aliasMap[cur];
+        else break;
+      }
+      return null;
+    };
+
+    return scriptCode.replace(
+      /\b(_0x[a-f0-9]{3,})\(\s*(0x[a-f0-9]+|\d+)\s*\)/gi,
+      (full, fnName, argStr) => {
+        try {
+          const fn = resolveFn(fnName);
+          if (fn) {
+            const val = fn(Number(argStr));
+            if (typeof val === "string") return JSON.stringify(val);
+          }
+        } catch (_) {}
+        return full;
+      }
+    );
+  } catch (_) {
+    return scriptCode;
+  }
+}
+
 function isStaticAsset(url = "") {
   const clean = url.split("?")[0].toLowerCase();
   if (
@@ -193,7 +277,6 @@ function normalizeUrl(raw = "", baseDomain = "") {
   return u;
 }
 
-// 1. Lấy danh sách các nút Server (.video2-btn / .movieLoader) trên Viet69
 function extractViet69Servers(html = "") {
   const servers = [];
   const seen = new Set();
@@ -250,7 +333,6 @@ function extractViet69Servers(html = "") {
   return servers;
 }
 
-// 2. Phân tích HTML trả về từ /get.video.php hoặc trang nhúng
 function parsePlayerHtml(rawHtml = "", baseDomain = "") {
   if (!rawHtml) return [];
   let buffer = String(rawHtml)
@@ -281,7 +363,11 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
     if (!u || seen.has(u)) return;
     seen.add(u);
     const lower = u.toLowerCase();
-    const isHls = lower.includes(".m3u8");
+    const isHls =
+      lower.includes(".m3u8") ||
+      lower.includes("/hls/") ||
+      lower.includes("/playlist") ||
+      lower.includes("/manifest");
     const isMp4 =
       lower.includes(".mp4") ||
       lower.includes(".webm") ||
@@ -321,14 +407,23 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
   }
 
   const jsFieldRegex =
-    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|video_url|videoSource|securedLink|stream_url|hls|mp4)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
+    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|video_url|videoSource|securedLink|stream_url|hls|mp4|link)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+|\/[^"'\s<>]+)["']/gi;
   while ((m = jsFieldRegex.exec(buffer)) !== null) {
     const fieldCall = m[0].toLowerCase();
     const isHlsField =
       fieldCall.includes("videosource") ||
       fieldCall.includes("securedlink") ||
-      fieldCall.includes("hls");
+      fieldCall.includes("hls") ||
+      fieldCall.includes("file") ||
+      fieldCall.includes("source");
     addUrl(m[1], isHlsField ? "hls" : "");
+  }
+
+  // Bắt lệnh hls.loadSource("...") trong Plyr / Hls.js
+  const loadSourceRegex =
+    /loadSource\s*\(\s*["'`](https?:\/\/[^"'`\s]+|\/[^"'`\s]+)["'`]\s*\)/gi;
+  while ((m = loadSourceRegex.exec(buffer)) !== null) {
+    addUrl(m[1], "hls");
   }
 
   (
@@ -337,25 +432,18 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
     ) || []
   ).forEach((u) => addUrl(u));
 
-  if (results.length === 0) {
-    const anyUrls = buffer.match(/https?:\/\/[^\s"'<>\\]+/gi) || [];
-    for (const u of anyUrls) {
-      addUrl(u);
-    }
-  }
-
   return results;
 }
 
-// 3. Đi xuyên vào bên trong trang Iframe (FirePlayer / JWPlayer / Embed) để lấy luồng .m3u8 trực tiếp
+// Bóc tách nội dung <body> và <script> của trang nhúng emb.cd-vs.com
 async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
   const directStreams = [];
   let embedSnippet = "";
+  let embedCookies = "";
 
   try {
     const embedUrlObj = new URL(iframeUrl);
     const embedOrigin = embedUrlObj.origin;
-    const embedHost = embedUrlObj.hostname;
 
     const res = await fetchWithTimeout(
       iframeUrl,
@@ -365,10 +453,9 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
           Referer: postLink
         }
       },
-      5500
+      6000
     );
 
-    let embedCookies = "";
     const setCookie = res.headers.get("set-cookie");
     if (setCookie) {
       embedCookies = setCookie
@@ -378,12 +465,58 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
     }
 
     const html = await res.text();
-    embedSnippet = html
-      .replace(/\s+/g, " ")
-      .slice(0, 350);
 
-    // 3a. Quét trực tiếp .m3u8 / .mp4 (kể cả trong Packer JS hoặc Base64)
-    const parsedInner = parsePlayerHtml(html, embedOrigin);
+    // Tách toàn bộ thẻ <script> nội tuyến trong trang emb.cd-vs.com (bỏ qua thẻ nạp thư viện ngoài)
+    const inlineScripts = [];
+    const scriptRegex = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+    let sm;
+    while ((sm = scriptRegex.exec(html)) !== null) {
+      const attrs = sm[1] || "";
+      const body = (sm[2] || "").trim();
+      if (body) {
+        const decodedBody = deobfuscateScriptWithVm(body);
+        inlineScripts.push(decodedBody);
+      } else {
+        const srcM = attrs.match(/src=["']([^"']+)["']/i);
+        if (
+          srcM &&
+          srcM[1] &&
+          !IGNORE_DOMAINS.some((d) => srcM[1].includes(d)) &&
+          !srcM[1].includes("plyr") &&
+          !srcM[1].includes("hls.js") &&
+          !srcM[1].includes("jquery")
+        ) {
+          try {
+            const extUrl = new URL(srcM[1], iframeUrl).toString();
+            const extRes = await fetchWithTimeout(
+              extUrl,
+              { headers: { ...BROWSER_HEADERS, Referer: iframeUrl } },
+              4000
+            );
+            if (extRes.ok) {
+              const extJs = await extRes.text();
+              inlineScripts.push(deobfuscateScriptWithVm(extJs));
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
+    const combinedScripts = inlineScripts.join("\n");
+    if (combinedScripts) {
+      embedSnippet = combinedScripts.replace(/\s+/g, " ").slice(0, 900);
+    } else {
+      const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+      embedSnippet = (bodyMatch ? bodyMatch[1] : html)
+        .replace(/\s+/g, " ")
+        .slice(0, 700);
+    }
+
+    // 1. Quét tìm link stream trực tiếp trong các script đã giải mã
+    const parsedInner = parsePlayerHtml(
+      html + "\n" + combinedScripts,
+      embedOrigin
+    );
     for (const item of parsedInner) {
       if (item.type === "hls" || item.type === "mp4") {
         directStreams.push({
@@ -394,60 +527,55 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
       }
     }
 
-    // 3b. Kiểm tra cơ chế FirePlayer / JWPlayer (POST /player/index.php?data=<hash>&do=getVideo)
-    const fireMatch =
-      html.match(/FirePlayer\s*\(\s*["']([a-zA-Z0-9_-]+)["']/i) ||
-      html.match(/player\/index\.php\?data=([a-zA-Z0-9_-]+)/i) ||
-      iframeUrl.match(/\/(?:v|e|embed|play|video)\/([a-zA-Z0-9_-]{8,})/i) ||
-      iframeUrl.match(/[?&](?:id|v|data)=([a-zA-Z0-9_-]{8,})/i);
-
-    if (fireMatch && fireMatch[1]) {
-      const hash = fireMatch[1];
-      const fireApiUrl = `${embedOrigin}/player/index.php?data=${encodeURIComponent(hash)}&do=getVideo`;
+    // 2. Tìm các endpoint AJAX nội bộ trong script của emb.cd-vs.com (ví dụ $.ajax / $.post / fetch)
+    const ajaxUrlRegex =
+      /(?:url\s*:\s*|\$\.(?:post|get|getJSON)\s*\(\s*|fetch\s*\(\s*)["'`]([^"'`\s]+)["'`]/gi;
+    let am;
+    while ((am = ajaxUrlRegex.exec(combinedScripts)) !== null) {
+      const rawAjaxPath = am[1];
+      if (rawAjaxPath.endsWith(".js") || rawAjaxPath.endsWith(".css")) continue;
       try {
-        const fireRes = await fetchWithTimeout(
-          fireApiUrl,
-          {
-            method: "POST",
-            headers: {
-              ...BROWSER_HEADERS,
-              Origin: embedOrigin,
-              Referer: iframeUrl,
-              "Content-Type":
-                "application/x-www-form-urlencoded; charset=UTF-8",
-              "X-Requested-With": "XMLHttpRequest",
-              ...(embedCookies ? { Cookie: embedCookies } : {})
-            },
-            body: `hash=${encodeURIComponent(hash)}&r=${encodeURIComponent(baseDomain + "/")}`
-          },
-          4500
-        );
+        const fullAjaxUrl = new URL(rawAjaxPath, iframeUrl).toString();
+        const uuidMatch = iframeUrl.match(/\/embed\/([a-zA-Z0-9_-]+)/i);
+        const uuid = uuidMatch ? uuidMatch[1] : "";
 
-        if (fireRes.ok) {
-          const fireText = await fireRes.text();
-          embedSnippet += ` | FireAPI: ${fireText.slice(0, 200)}`;
-          try {
-            const fireJson = JSON.parse(fireText);
-            const streamUrl =
-              fireJson.securedLink ||
-              fireJson.videoSource ||
-              fireJson.file ||
-              fireJson.hls ||
-              "";
-            if (streamUrl && streamUrl.startsWith("http")) {
-              directStreams.unshift({
-                url: streamUrl,
-                type: streamUrl.includes(".mp4") ? "mp4" : "hls",
-                referer: iframeUrl
-              });
-            }
-          } catch (_) {
-            const extra = parsePlayerHtml(fireText, embedOrigin);
-            for (const x of extra) {
-              if (x.type === "hls" || x.type === "mp4") {
-                directStreams.unshift({
-                  url: x.url,
-                  type: x.type,
+        // Thử cả POST và GET tới endpoint AJAX của emb.cd-vs.com
+        for (const method of ["POST", "GET"]) {
+          if (directStreams.length > 0) break;
+          const ajaxRes = await fetchWithTimeout(
+            fullAjaxUrl,
+            {
+              method,
+              headers: {
+                ...BROWSER_HEADERS,
+                Origin: embedOrigin,
+                Referer: iframeUrl,
+                "X-Requested-With": "XMLHttpRequest",
+                ...(method === "POST"
+                  ? {
+                      "Content-Type":
+                        "application/x-www-form-urlencoded; charset=UTF-8"
+                    }
+                  : {}),
+                ...(embedCookies ? { Cookie: embedCookies } : {})
+              },
+              ...(method === "POST"
+                ? {
+                    body: `id=${encodeURIComponent(uuid)}&vid=${encodeURIComponent(uuid)}&r=${encodeURIComponent(baseDomain + "/")}`
+                  }
+                : {})
+            },
+            4500
+          );
+          if (ajaxRes.ok) {
+            const ajaxText = await ajaxRes.text();
+            embedSnippet += ` | Ajax(${rawAjaxPath}): ${ajaxText.slice(0, 250)}`;
+            const extracted = parsePlayerHtml(ajaxText, embedOrigin);
+            for (const ex of extracted) {
+              if (ex.type === "hls" || ex.type === "mp4") {
+                directStreams.push({
+                  url: ex.url,
+                  type: ex.type,
                   referer: iframeUrl
                 });
               }
@@ -455,51 +583,14 @@ async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
           }
         }
       } catch (_) {}
-
-      // 3c. Kiểm tra chuẩn Fembed / Short.ink (POST /api/source/<hash>)
-      if (directStreams.length === 0 && html.includes("/api/source/")) {
-        try {
-          const apiRes = await fetchWithTimeout(
-            `${embedOrigin}/api/source/${encodeURIComponent(hash)}`,
-            {
-              method: "POST",
-              headers: {
-                ...BROWSER_HEADERS,
-                Origin: embedOrigin,
-                Referer: iframeUrl,
-                "Content-Type":
-                  "application/x-www-form-urlencoded; charset=UTF-8",
-                "X-Requested-With": "XMLHttpRequest"
-              },
-              body: `r=${encodeURIComponent(baseDomain + "/")}&d=${encodeURIComponent(embedHost)}`
-            },
-            4500
-          );
-          if (apiRes.ok) {
-            const apiJson = await apiRes.json();
-            if (Array.isArray(apiJson?.data)) {
-              for (const item of apiJson.data) {
-                if (item.file) {
-                  directStreams.push({
-                    url: item.file,
-                    type: item.type === "mp4" || item.file.includes(".mp4") ? "mp4" : "hls",
-                    referer: iframeUrl
-                  });
-                }
-              }
-            }
-          }
-        } catch (_) {}
-      }
     }
   } catch (err) {
     embedSnippet = `HopError: ${err.message}`;
   }
 
-  return { directStreams, embedSnippet };
+  return { directStreams, embedSnippet, embedCookies };
 }
 
-// 4. Gọi POST /get.video.php (hoặc /get.xvideo.php khi type == 10) và bóc tách sâu
 async function fetchViet69PlayerUrl({
   baseDomain,
   postLink,
@@ -550,129 +641,177 @@ async function fetchViet69PlayerUrl({
 
     for (const item of parsed) {
       if (item.type === "iframe") {
-        // Quét xuyên vào trong iframe để lấy luồng HLS/MP4 trực tiếp
-        const { directStreams, embedSnippet } = await resolveEmbedPage(
-          item.url,
-          postLink,
-          baseDomain
-        );
-        if (embedSnippet) hopLog += ` -> ${embedSnippet}`;
+        const { directStreams, embedSnippet, embedCookies } =
+          await resolveEmbedPage(item.url, postLink, baseDomain);
+        if (embedSnippet) hopLog += `\n -> [Body]: ${embedSnippet}`;
 
         for (const ds of directStreams) {
           enrichedItems.push({
             url: ds.url,
             type: ds.type,
             referer: ds.referer || item.url,
+            embedCookies,
             isDirectResolved: true
           });
         }
+        enrichedItems.push({
+          url: item.url,
+          type: "iframe",
+          referer: postLink,
+          embedCookies,
+          isDirectResolved: false
+        });
+      } else {
+        enrichedItems.push({
+          url: item.url,
+          type: item.type,
+          referer: postLink,
+          embedCookies: "",
+          isDirectResolved: true
+        });
       }
-      enrichedItems.push({
-        url: item.url,
-        type: item.type,
-        referer: postLink,
-        isDirectResolved: false
-      });
     }
 
     return {
       items: enrichedItems,
-      rawResponse: `${text.slice(0, 250)}${hopLog}`
+      rawResponse: `${text.trim()}${hopLog}`
     };
   } catch (err) {
     return { items: [], rawResponse: `Error: ${err.message}` };
   }
 }
 
+// =====================================================================
+// HÀM PROXY ĐA NĂNG (HỖ TRỢ CẢ GET VÀ POST CHO XHR/FETCH & HLS PLAYLIST)
+// =====================================================================
+async function handleRawProxy(req) {
+  const sp = req.nextUrl.searchParams;
+  const targetUrl = sp.get("url");
+  const referer = sp.get("referer") || `${DEFAULT_DOMAIN}/`;
+  const cookie = sp.get("cookie") || "";
+
+  if (!targetUrl) {
+    return new NextResponse("Missing url", { status: 400, headers: CORS });
+  }
+
+  try {
+    const refOrigin = new URL(referer).origin;
+    const method = (req.method || "GET").toUpperCase();
+
+    const headers = {
+      ...BROWSER_HEADERS,
+      Origin: refOrigin,
+      Referer: referer
+    };
+
+    const reqContentType = req.headers.get("content-type");
+    if (reqContentType) headers["Content-Type"] = reqContentType;
+
+    const reqWith = req.headers.get("x-requested-with");
+    if (reqWith) headers["X-Requested-With"] = reqWith;
+    else headers["X-Requested-With"] = "XMLHttpRequest";
+
+    const rangeHeader = req.headers.get("range");
+    if (rangeHeader) headers["Range"] = rangeHeader;
+
+    if (cookie) headers["Cookie"] = cookie;
+
+    const fetchOpts = { method, headers };
+    if (method !== "GET" && method !== "HEAD") {
+      const bodyBuf = await req.arrayBuffer();
+      if (bodyBuf && bodyBuf.byteLength > 0) {
+        fetchOpts.body = bodyBuf;
+      }
+    }
+
+    const upstream = await fetchWithTimeout(targetUrl, fetchOpts, 9000);
+    const contentType = (
+      upstream.headers.get("content-type") || ""
+    ).toLowerCase();
+    const buffer = await upstream.arrayBuffer();
+    const firstBytes = Buffer.from(buffer.slice(0, 16))
+      .toString("utf-8")
+      .trim();
+
+    // Nếu phản hồi là file danh sách phát HLS (#EXTM3U), viết lại mọi đường dẫn con qua Proxy
+    if (
+      firstBytes.startsWith("#EXTM3U") ||
+      contentType.includes("mpegurl") ||
+      targetUrl.includes(".m3u8")
+    ) {
+      const text = Buffer.from(buffer).toString("utf-8");
+      const rewritten = text
+        .split(/\r?\n/)
+        .map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return line;
+          if (trimmed.startsWith("#")) {
+            return line.replace(/URI=["']([^"']+)["']/gi, (_, uri) => {
+              try {
+                const abs = new URL(uri, targetUrl).toString();
+                return `URI="/api/videos?rawProxy=1&url=${encodeURIComponent(abs)}&referer=${encodeURIComponent(referer)}"`;
+              } catch (_) {
+                return `URI="${uri}"`;
+              }
+            });
+          }
+          try {
+            const abs = new URL(trimmed, targetUrl).toString();
+            return `/api/videos?rawProxy=1&url=${encodeURIComponent(abs)}&referer=${encodeURIComponent(referer)}`;
+          } catch (_) {
+            return line;
+          }
+        })
+        .join("\n");
+
+      return new NextResponse(rewritten, {
+        status: 200,
+        headers: {
+          ...CORS,
+          "Content-Type": "application/vnd.apple.mpegurl",
+          "Cache-Control": "no-store"
+        }
+      });
+    }
+
+    const resHeaders = {
+      ...CORS,
+      "Content-Type":
+        upstream.headers.get("content-type") || "application/octet-stream",
+      "Cache-Control": "public, max-age=300"
+    };
+    const contentRange = upstream.headers.get("content-range");
+    if (contentRange) resHeaders["Content-Range"] = contentRange;
+
+    return new NextResponse(buffer, {
+      status: upstream.status,
+      headers: resHeaders
+    });
+  } catch (err) {
+    return new NextResponse(err.message, { status: 502, headers: CORS });
+  }
+}
+
+export async function POST(req) {
+  const sp = req.nextUrl.searchParams;
+  if (sp.get("rawProxy") === "1" || sp.get("hlsProxy") === "1") {
+    return handleRawProxy(req);
+  }
+  return NextResponse.json({ error: "method_not_allowed" }, { status: 405, headers: CORS });
+}
+
 export async function GET(req) {
   const sp = req.nextUrl.searchParams;
 
   // =================================================================
-  // CHẾ ĐỘ A: PROXY LUỒNG HLS (.m3u8 / .ts) VƯỢT CHẶN REFERER & CORS
+  // CHẾ ĐỘ A: PROXY LUỒNG DỮ LIỆU / XHR / HLS (.m3u8 / .ts / AJAX)
   // =================================================================
-  if (sp.get("hlsProxy") === "1") {
-    const targetUrl = sp.get("url");
-    const referer = sp.get("referer") || `${DEFAULT_DOMAIN}/`;
-    if (!targetUrl) {
-      return new NextResponse("Missing url", { status: 400, headers: CORS });
-    }
-    try {
-      const refOrigin = new URL(referer).origin;
-      const upstream = await fetchWithTimeout(
-        targetUrl,
-        {
-          headers: {
-            ...BROWSER_HEADERS,
-            Origin: refOrigin,
-            Referer: referer
-          }
-        },
-        9000
-      );
-
-      const contentType = (
-        upstream.headers.get("content-type") || ""
-      ).toLowerCase();
-      const buffer = await upstream.arrayBuffer();
-      const firstBytes = Buffer.from(buffer.slice(0, 16)).toString("utf-8");
-
-      // Nếu là file danh sách phát M3U8 (#EXTM3U), viết lại các đường dẫn con qua Proxy
-      if (
-        firstBytes.startsWith("#EXTM3U") ||
-        contentType.includes("mpegurl") ||
-        targetUrl.includes(".m3u8")
-      ) {
-        const text = Buffer.from(buffer).toString("utf-8");
-        const rewritten = text
-          .split(/\r?\n/)
-          .map((line) => {
-            const trimmed = line.trim();
-            if (!trimmed) return line;
-            if (trimmed.startsWith("#")) {
-              return line.replace(/URI=["']([^"']+)["']/gi, (_, uri) => {
-                try {
-                  const abs = new URL(uri, targetUrl).toString();
-                  return `URI="/api/videos?hlsProxy=1&url=${encodeURIComponent(abs)}&referer=${encodeURIComponent(referer)}"`;
-                } catch (_) {
-                  return `URI="${uri}"`;
-                }
-              });
-            }
-            try {
-              const abs = new URL(trimmed, targetUrl).toString();
-              return `/api/videos?hlsProxy=1&url=${encodeURIComponent(abs)}&referer=${encodeURIComponent(referer)}`;
-            } catch (_) {
-              return line;
-            }
-          })
-          .join("\n");
-
-        return new NextResponse(rewritten, {
-          status: 200,
-          headers: {
-            ...CORS,
-            "Content-Type": "application/vnd.apple.mpegurl",
-            "Cache-Control": "no-store"
-          }
-        });
-      }
-
-      return new NextResponse(buffer, {
-        status: upstream.status,
-        headers: {
-          ...CORS,
-          "Content-Type":
-            upstream.headers.get("content-type") || "video/mp2t",
-          "Cache-Control": "public, max-age=3600"
-        }
-      });
-    } catch (err) {
-      return new NextResponse(err.message, { status: 502, headers: CORS });
-    }
+  if (sp.get("rawProxy") === "1" || sp.get("hlsProxy") === "1") {
+    return handleRawProxy(req);
   }
 
   // =================================================================
-  // CHẾ ĐỘ B: PROXY TRANG NHÚNG IFRAME (GIẢ LẬP DOCUMENT.REFERRER = VIET69)
+  // CHẾ ĐỘ B: PROXY TRANG NHÚNG IFRAME (BẮT TOÀN BỘ XHR/FETCH CỦA PLYR)
   // =================================================================
   if (sp.get("embedProxy") === "1") {
     const targetUrl = sp.get("url");
@@ -691,36 +830,118 @@ export async function GET(req) {
         },
         8000
       );
+
+      let embedCookies = "";
+      const setCookie = upstream.headers.get("set-cookie");
+      if (setCookie) {
+        embedCookies = setCookie
+          .split(/,(?=\s*[a-zA-Z0-9_-]+=)/)
+          .map((c) => c.split(";")[0].trim())
+          .join("; ");
+      }
+
       let html = await upstream.text();
-      const targetOrigin = new URL(targetUrl).origin;
-      const injectHead = `
-        <base href="${targetUrl}">
-        <meta name="referrer" content="no-referrer">
+      const targetUrlObj = new URL(targetUrl);
+      const targetOrigin = targetUrlObj.origin;
+
+      // Chuyển các đường dẫn tĩnh tương đối (/...) trong HTML sang qua rawProxy
+      html = html.replace(
+        /\b(src|href)=["'](\/(?!\/)[^"']+)["']/gi,
+        (_, attr, relPath) => {
+          const abs = `${targetOrigin}${relPath}`;
+          return `${attr}="/api/videos?rawProxy=1&url=${encodeURIComponent(abs)}&referer=${encodeURIComponent(targetUrl)}"`;
+        }
+      );
+
+      // Tiêm bộ đánh chặn XHR + Fetch + History.replaceState vào đầu <head>
+      const interceptorScript = `
         <style>html,body{margin:0!important;padding:0!important;width:100%!important;height:100%!important;overflow:hidden!important;background:#000!important;}</style>
         <script>
-          try {
-            Object.defineProperty(document, 'referrer', { get: function() { return '${referer}'; } });
-            Object.defineProperty(window, 'top', { get: function() { return window.self; } });
-            Object.defineProperty(window, 'parent', { get: function() { return window.self; } });
-          } catch (e) {}
+          (function() {
+            var TARGET_URL = ${JSON.stringify(targetUrl)};
+            var TARGET_ORIGIN = ${JSON.stringify(targetOrigin)};
+            var TARGET_PATH = ${JSON.stringify(targetUrlObj.pathname + targetUrlObj.search)};
+            var REFERER_URL = ${JSON.stringify(referer)};
+            var COOKIE_STR = ${JSON.stringify(embedCookies)};
+            var PROXY_ENDPOINT = window.location.origin + "/api/videos?rawProxy=1";
+
+            try {
+              history.replaceState(null, "", TARGET_PATH);
+            } catch (e) {}
+
+            try {
+              Object.defineProperty(document, "referrer", {
+                get: function() { return REFERER_URL; },
+                configurable: true
+              });
+            } catch (e) {}
+
+            function rewriteToProxy(rawUrl) {
+              if (!rawUrl || typeof rawUrl !== "string") return rawUrl;
+              if (
+                rawUrl.indexOf("blob:") === 0 ||
+                rawUrl.indexOf("data:") === 0 ||
+                rawUrl.indexOf("/api/videos?") !== -1
+              ) {
+                return rawUrl;
+              }
+              var abs = rawUrl;
+              try {
+                if (rawUrl.indexOf("//") === 0) {
+                  abs = "https:" + rawUrl;
+                } else if (rawUrl.indexOf("/") === 0) {
+                  abs = TARGET_ORIGIN + rawUrl;
+                } else if (!/^https?:\\/\\//i.test(rawUrl)) {
+                  abs = new URL(rawUrl, TARGET_URL).toString();
+                }
+              } catch (e) {}
+
+              if (/googleapis\\.com|cloudflare\\.com|jsdelivr\\.net/i.test(abs)) {
+                return abs;
+              }
+
+              return (
+                PROXY_ENDPOINT +
+                "&url=" + encodeURIComponent(abs) +
+                "&referer=" + encodeURIComponent(TARGET_URL) +
+                (COOKIE_STR ? "&cookie=" + encodeURIComponent(COOKIE_STR) : "")
+              );
+            }
+
+            var origOpen = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function(method, url) {
+              var args = Array.prototype.slice.call(arguments);
+              args[1] = rewriteToProxy(String(url));
+              return origOpen.apply(this, args);
+            };
+
+            if (window.fetch) {
+              var origFetch = window.fetch;
+              window.fetch = function(input, init) {
+                if (typeof input === "string") {
+                  input = rewriteToProxy(input);
+                } else if (input && typeof input.url === "string") {
+                  input = new Request(rewriteToProxy(input.url), input);
+                }
+                return origFetch.call(this, input, init);
+              };
+            }
+          })();
         </script>
       `;
+
       if (/<head[^>]*>/i.test(html)) {
-        html = html.replace(/<head[^>]*>/i, (m) => `${m}${injectHead}`);
+        html = html.replace(/<head[^>]*>/i, (m) => `${m}${interceptorScript}`);
       } else {
-        html = `${injectHead}${html}`;
+        html = `${interceptorScript}${html}`;
       }
-      // Chuyển các đường dẫn gốc tương đối sang tuyệt đối
-      html = html.replace(
-        /\b(src|href)=["']\/(?!\/)([^"']*)["']/gi,
-        `$1="${targetOrigin}/$2"`
-      );
 
       return new NextResponse(html, {
         status: 200,
         headers: {
           ...CORS,
-          "Content-Type": "text/html; charset=utf-8"
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store"
         }
       });
     } catch (err) {
@@ -833,32 +1054,32 @@ export async function GET(req) {
             for (const mediaItem of res.items) {
               if (mediaItem.type === "hls" || mediaItem.type === "mp4") {
                 allStreams.push(mediaItem.url);
-                const proxyStreamUrl = `/api/videos?hlsProxy=1&url=${encodeURIComponent(mediaItem.url)}&referer=${encodeURIComponent(mediaItem.referer || postLink)}`;
+                const proxyStreamUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaItem.url)}&referer=${encodeURIComponent(mediaItem.referer || postLink)}`;
                 customSources.push({
                   label: `${srv.label} (VIP)`,
                   name: `${srv.label} (VIP)`,
-                  url: mediaItem.url,
-                  src: mediaItem.url,
+                  url: proxyStreamUrl,
+                  src: proxyStreamUrl,
+                  rawUrl: mediaItem.url,
                   proxyUrl: proxyStreamUrl,
-                  referer: mediaItem.referer || postLink,
                   type: mediaItem.type
                 });
               } else {
                 allIframes.push(mediaItem.url);
                 const proxyEmbedUrl = `/api/videos?embedProxy=1&url=${encodeURIComponent(mediaItem.url)}&referer=${encodeURIComponent(postLink)}`;
+                // Đưa bản Tunnel Proxy làm mặc định vì bản gốc emb.cd-vs.com khóa domain viet69
                 customSources.push({
                   label: srv.label,
                   name: srv.label,
-                  url: mediaItem.url,
-                  src: mediaItem.url,
-                  proxyUrl: proxyEmbedUrl,
+                  url: proxyEmbedUrl,
+                  src: proxyEmbedUrl,
                   type: "iframe"
                 });
                 customSources.push({
-                  label: `${srv.label} (Proxy)`,
-                  name: `${srv.label} (Proxy)`,
-                  url: proxyEmbedUrl,
-                  src: proxyEmbedUrl,
+                  label: `${srv.label} (Gốc)`,
+                  name: `${srv.label} (Gốc)`,
+                  url: mediaItem.url,
+                  src: mediaItem.url,
                   type: "iframe"
                 });
               }
@@ -869,27 +1090,9 @@ export async function GET(req) {
             debugInfo.playerSnippet = rawSnippets.join("\n\n");
           }
         }
-
-        if (customSources.length === 0) {
-          const directParsed = parsePlayerHtml(pageHtml, baseDomain).filter(
-            (x) =>
-              !x.url.includes(baseHost) && !x.url.includes("viet69")
-          );
-          directParsed.forEach((item, i) => {
-            customSources.push({
-              label: `Server #${i + 1}`,
-              name: `Server #${i + 1}`,
-              url: item.url,
-              src: item.url,
-              type: item.type
-            });
-            if (item.type === "iframe") allIframes.push(item.url);
-            else allStreams.push(item.url);
-          });
-        }
       }
 
-      // Ưu tiên đưa các luồng Direct HLS/MP4 (VIP) lên đầu để tự động phát ngay
+      // Ưu tiên luồng Direct HLS/MP4 (nếu có), sau đó đến Tunnel Proxy
       customSources.sort((a, b) => {
         const aDirect = a.type === "hls" || a.type === "mp4" ? 0 : 1;
         const bDirect = b.type === "hls" || b.type === "mp4" ? 0 : 1;
@@ -915,8 +1118,8 @@ export async function GET(req) {
           videoUrl: streams[0] || primaryUrl,
           hlsUrl: streams[0] || "",
           mp4Url: streams.find((s) => s.includes(".mp4")) || "",
-          embedUrl: iframes[0] || "",
-          iframe: iframes[0] || "",
+          embedUrl: primaryUrl,
+          iframe: primaryUrl,
           type: primaryType,
           videoType: primaryType,
           streams,
