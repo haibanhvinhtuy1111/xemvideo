@@ -23,7 +23,7 @@ const BROWSER_HEADERS = {
   "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
 };
 
-const FALLBACK_THUMB = "https://placehold.co/600x340/18181b/e11d48?text=Video";
+const FALLBACK_THUMB = "https://placehold.co/600x340/1e293b/94a3b8?text=Video";
 
 const IGNORE_DOMAINS = [
   "googletagmanager.com",
@@ -45,7 +45,6 @@ const IGNORE_DOMAINS = [
   "jquery.com"
 ];
 
-// Bản đồ đường dẫn & từ khóa dự phòng cho các thẻ trên thanh menu Viet69
 const CATEGORY_MAP = {
   "phim-sex-viet-moi": {
     paths: [
@@ -101,8 +100,8 @@ const CATEGORY_MAP = {
   }
 };
 
-// Bộ nhớ đệm lưu đường dẫn thực tế của menu quét từ trang chủ
 const navPathCache = new Map();
+const sortParamCache = new Map();
 
 export async function OPTIONS() {
   return new NextResponse(null, { status: 200, headers: CORS });
@@ -130,6 +129,15 @@ function toSlugKey(str = "") {
     .replace(/^-+|-+$/g, "");
 }
 
+function parseStatNumber(val = "0") {
+  const s = String(val).trim().toLowerCase().replace(/,/g, "");
+  const num = parseFloat(s);
+  if (isNaN(num)) return 0;
+  if (s.endsWith("k")) return Math.round(num * 1000);
+  if (s.endsWith("m")) return Math.round(num * 1000000);
+  return Math.round(num);
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -153,7 +161,6 @@ function is404Html(html = "") {
   return false;
 }
 
-// Tải HTML: Nếu gặp 404 thì thoát ngay lập tức (KHÔNG gọi proxy làm treo 10s)
 async function fetchHtmlWithFallback(targetUrl, headers, allowProxy = true) {
   let status = 0;
   let cookies = "";
@@ -168,7 +175,6 @@ async function fetchHtmlWithFallback(targetUrl, headers, allowProxy = true) {
         .join("; ");
     }
 
-    // Nếu trang không tồn tại (404), trả về ngay để thử đường dẫn khác
     if (status === 404) {
       return { html: "", via: "404", status: 404, cookies: "" };
     }
@@ -184,7 +190,6 @@ async function fetchHtmlWithFallback(targetUrl, headers, allowProxy = true) {
     }
   } catch (_) {}
 
-  // Chỉ dùng Proxy khi thực sự bị chặn Cloudflare (403/503/0) và được phép
   if (!allowProxy || status === 404) {
     return { html: "", via: "failed", status, cookies: "" };
   }
@@ -774,7 +779,6 @@ async function fetchViet69PlayerUrl({
   }
 }
 
-// Bóc tách tổng số trang thực tế từ thanh phân trang WP-PageNavi ("Page 1 of 1,050" / "Last »")
 function extractTotalPagesFromHtml(html = "", currentPage = 1) {
   let maxPage = currentPage;
 
@@ -800,8 +804,42 @@ function extractTotalPagesFromHtml(html = "", currentPage = 1) {
   return Math.max(1, maxPage);
 }
 
-// Quét menu trên trang gốc và lưu vào bộ nhớ đệm navPathCache
+// Tự động học tham số URL của menu "Sắp xếp theo" trên trang nguồn
+function learnSortParamsFromHtml(html = "") {
+  const linkRegex =
+    /<a\b[^>]*href=(?:["']([^"']+)["']|([^\s>"']+))[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = linkRegex.exec(html)) !== null) {
+    const href = m[1] || m[2] || "";
+    const text = cleanText(m[3]).toLowerCase();
+    if (!href.includes("?")) continue;
+    const qs = href.split("?")[1]?.split("#")[0] || "";
+    if (!qs) continue;
+
+    if (text === "mới nhất") sortParamCache.set("latest", qs);
+    else if (text === "lượt xem") sortParamCache.set("views", qs);
+    else if (text === "lượt thích") sortParamCache.set("likes", qs);
+    else if (text === "bình luận") sortParamCache.set("comments", qs);
+  }
+}
+
+function getSortQueryString(sortBy = "latest") {
+  if (!sortBy || sortBy === "latest") {
+    return sortParamCache.get("latest") || "";
+  }
+  if (sortParamCache.has(sortBy)) {
+    return sortParamCache.get(sortBy);
+  }
+  const defaults = {
+    views: "orderby=views&filter=most-viewed",
+    likes: "orderby=likes&filter=popular",
+    comments: "orderby=comment_count&filter=comments"
+  };
+  return defaults[sortBy] || "";
+}
+
 function extractNavCategories(html = "", baseDomain = "", baseHost = "") {
+  learnSortParamsFromHtml(html);
   const categories = [];
   const seen = new Set();
 
@@ -871,7 +909,47 @@ function extractThumbnailFromBlock(block = "") {
   return FALLBACK_THUMB;
 }
 
-// Bóc tách danh sách bài viết (hỗ trợ cả HTML đã bị LiteSpeed nén mất dấu ngoặc kép)
+// Bóc tách 3 chỉ số: Lượt xem, Bình luận, Lượt thích từ từng khối video
+function extractStatsFromBlock(block = "") {
+  // Tìm các con số nằm ngay sau thẻ </svg> hoặc </i> trong thanh thông số của thẻ bài viết
+  const iconNumbers = [];
+  const afterIconRegex =
+    /(?:<\/svg>|<\/i>)\s*(?:<span[^>]*>)?\s*(\d[\d,.]*[kKmM]?)\b/gi;
+  let m;
+  while ((m = afterIconRegex.exec(block)) !== null) {
+    iconNumbers.push(m[1]);
+  }
+  if (iconNumbers.length >= 3) {
+    return {
+      views: iconNumbers[0],
+      comments: iconNumbers[1],
+      likes: iconNumbers[2]
+    };
+  }
+
+  // Fallback: Quét các thẻ span/div ở phần chân của card (sau thẻ đóng tiêu đề hoặc thẻ a cuối)
+  const tailPart = block.slice(Math.floor(block.length * 0.45));
+  const standaloneNums = [];
+  const spanNumRegex = />\s*(\d[\d,.]*[kKmM]?)\s*</g;
+  while ((m = spanNumRegex.exec(tailPart)) !== null) {
+    standaloneNums.push(m[1]);
+  }
+  if (standaloneNums.length >= 3) {
+    const lastThree = standaloneNums.slice(-3);
+    return {
+      views: lastThree[0],
+      comments: lastThree[1],
+      likes: lastThree[2]
+    };
+  }
+
+  return {
+    views: standaloneNums[0] || "0",
+    comments: standaloneNums[1] || "0",
+    likes: standaloneNums[2] || "0"
+  };
+}
+
 function parseVideoListHtml(
   html = "",
   baseDomain = "",
@@ -890,7 +968,6 @@ function parseVideoListHtml(
         );
 
   for (const block of blocks) {
-    // Quét tất cả thẻ <a> trong khối để chọn đúng link bài viết (không bị vướng link category/tag phụ)
     const aTagRegex =
       /<a\b[^>]*href\s*=\s*(?:["']([^"']+)["']|([^\s>"']+))[^>]*>/gi;
     let chosenUrl = null;
@@ -941,12 +1018,10 @@ function parseVideoListHtml(
       block.match(/\balt=["']([^"']+)["']/i);
 
     const thumb = extractThumbnailFromBlock(block);
+    const stats = extractStatsFromBlock(block);
 
     const durationMatch = block.match(
       /<span[^>]*class=["']?[^"'>]*(?:duration|time|length)[^"'>]*["']?[^>]*>([\s\S]*?)<\/span>/i
-    );
-    const viewsMatch = block.match(
-      /<span[^>]*class=["']?[^"'>]*(?:views|view-count)[^"'>]*["']?[^>]*>([\s\S]*?)<\/span>/i
     );
 
     items.push({
@@ -961,16 +1036,30 @@ function parseVideoListHtml(
       poster: thumb,
       image: thumb,
       duration: durationMatch ? cleanText(durationMatch[1]) : "",
-      views: viewsMatch ? cleanText(viewsMatch[1]) : ""
+      views: stats.views,
+      comments: stats.comments,
+      likes: stats.likes
     });
   }
 
   return items;
 }
 
-// =====================================================================
-// HÀM PROXY ĐA NĂNG (HỖ TRỢ CẢ GET VÀ POST CHO XHR/FETCH & HLS PLAYLIST)
-// =====================================================================
+function sortVideoItems(items = [], sortBy = "latest") {
+  if (!sortBy || sortBy === "latest") return items;
+  const copy = [...items];
+  if (sortBy === "views") {
+    copy.sort((a, b) => parseStatNumber(b.views) - parseStatNumber(a.views));
+  } else if (sortBy === "likes") {
+    copy.sort((a, b) => parseStatNumber(b.likes) - parseStatNumber(a.likes));
+  } else if (sortBy === "comments") {
+    copy.sort(
+      (a, b) => parseStatNumber(b.comments) - parseStatNumber(a.comments)
+    );
+  }
+  return copy;
+}
+
 async function handleRawProxy(req) {
   const sp = req.nextUrl.searchParams;
   const targetUrl = sp.get("url");
@@ -1092,12 +1181,10 @@ export async function POST(req) {
 export async function GET(req) {
   const sp = req.nextUrl.searchParams;
 
-  // CHẾ ĐỘ A: PROXY LUỒNG DỮ LIỆU / XHR / HLS
   if (sp.get("rawProxy") === "1" || sp.get("hlsProxy") === "1") {
     return handleRawProxy(req);
   }
 
-  // CHẾ ĐỘ B: PROXY TRANG NHÚNG IFRAME
   if (sp.get("embedProxy") === "1") {
     const targetUrl = sp.get("url");
     const referer = sp.get("referer") || `${DEFAULT_DOMAIN}/`;
@@ -1232,9 +1319,9 @@ export async function GET(req) {
     }
   }
 
-  // CHẾ ĐỘ C: API LẤY VIDEO CHI TIẾT & DANH SÁCH THEO DANH MỤC / PHÂN TRANG
   const slug = sp.get("slug");
   const category = (sp.get("category") || "all").trim();
+  const sortBy = (sp.get("sort") || "latest").trim();
   const q = (sp.get("q") || "").trim();
   const page = Math.max(1, parseInt(sp.get("page") || "1", 10) || 1);
   const per = siteConfig?.perPage || 20;
@@ -1273,9 +1360,7 @@ export async function GET(req) {
 
   const reqHeaders = { ...BROWSER_HEADERS, Referer: `${baseDomain}/` };
 
-  // =================================================================
-  // TRƯỜNG HỢP 1: LẤY CHI TIẾT VIDEO THEO SLUG (?slug=...)
-  // =================================================================
+  // TRƯỜNG HỢP 1: LẤY CHI TIẾT VIDEO THEO SLUG
   if (slug) {
     const cleanSlug = slug.replace(/^\/+|\/+$/g, "");
     const localVideo = data.find(
@@ -1434,23 +1519,33 @@ export async function GET(req) {
     }
   }
 
-  // =================================================================
-  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO THEO DANH MỤC / TÌM KIẾM / TRANG
-  // =================================================================
+  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO THEO DANH MỤC / TÌM KIẾM / SẮP XẾP / TRANG
   try {
     const cleanCat = category.replace(/^\/+|\/+$/g, "");
     const bareSlug = cleanCat.replace(/^(?:category|tag)\//i, "");
     const pageSuffix = page > 1 ? `page/${page}/` : "";
+    const sortQuery = getSortQueryString(sortBy);
 
-    // 1. Nếu có từ khóa tìm kiếm q hoặc ở trang chủ ("all")
+    const appendSort = (baseUrl) => {
+      if (!sortQuery) return baseUrl;
+      return `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}${sortQuery}`;
+    };
+
     if (q || !cleanCat || cleanCat === "all" || cleanCat === "movie") {
-      const targetUrl = q
+      const baseTarget = q
         ? `${baseDomain}/${pageSuffix}?s=${encodeURIComponent(q)}`
         : `${baseDomain}/${pageSuffix}`;
+      const targetUrl = appendSort(baseTarget);
 
       const { html } = await fetchHtmlWithFallback(targetUrl, reqHeaders, true);
       if (html) {
-        const items = parseVideoListHtml(html, baseDomain, baseHost, cleanCat);
+        const rawItems = parseVideoListHtml(
+          html,
+          baseDomain,
+          baseHost,
+          cleanCat
+        );
+        const items = sortVideoItems(rawItems, sortBy);
         const totalPages = extractTotalPagesFromHtml(html, page);
         const navCategories = extractNavCategories(html, baseDomain, baseHost);
 
@@ -1468,57 +1563,63 @@ export async function GET(req) {
         }
       }
     } else {
-      // 2. Khi người dùng bấm vào một Thẻ / Danh mục cụ thể
       const candidateUrls = new Set();
 
-      // 2a. Ưu tiên đường dẫn thực tế đã học từ thanh menu của Viet69
       const cachedPath =
         navPathCache.get(cleanCat) || navPathCache.get(bareSlug);
       if (cachedPath) {
-        candidateUrls.add(`${baseDomain}/${cachedPath}/${pageSuffix}`);
+        candidateUrls.add(
+          appendSort(`${baseDomain}/${cachedPath}/${pageSuffix}`)
+        );
       }
 
-      // 2b. Đường dẫn cấu hình sẵn trong CATEGORY_MAP
       const mapped = CATEGORY_MAP[bareSlug];
       if (mapped && Array.isArray(mapped.paths)) {
         for (const p of mapped.paths) {
           const cleanP = p.replace(/^\/+|\/+$/g, "");
           candidateUrls.add(
-            cleanP
-              ? `${baseDomain}/${cleanP}/${pageSuffix}`
-              : `${baseDomain}/${pageSuffix}`
+            appendSort(
+              cleanP
+                ? `${baseDomain}/${cleanP}/${pageSuffix}`
+                : `${baseDomain}/${pageSuffix}`
+            )
           );
         }
       }
 
-      // 2c. Các cấu trúc chuẩn của WordPress (/tag/..., /category/..., /...)
       if (cleanCat.startsWith("tag/") || cleanCat.startsWith("category/")) {
-        candidateUrls.add(`${baseDomain}/${cleanCat}/${pageSuffix}`);
+        candidateUrls.add(
+          appendSort(`${baseDomain}/${cleanCat}/${pageSuffix}`)
+        );
       }
-      candidateUrls.add(`${baseDomain}/tag/${bareSlug}/${pageSuffix}`);
-      candidateUrls.add(`${baseDomain}/category/${bareSlug}/${pageSuffix}`);
-      candidateUrls.add(`${baseDomain}/${bareSlug}/${pageSuffix}`);
+      candidateUrls.add(
+        appendSort(`${baseDomain}/tag/${bareSlug}/${pageSuffix}`)
+      );
+      candidateUrls.add(
+        appendSort(`${baseDomain}/category/${bareSlug}/${pageSuffix}`)
+      );
+      candidateUrls.add(appendSort(`${baseDomain}/${bareSlug}/${pageSuffix}`));
 
-      // 2d. Luôn kèm 1 nhánh tìm kiếm từ khóa dự phòng để đảm bảo 100% không bao giờ trống
       const fallbackKeyword =
         mapped?.keyword || bareSlug.replace(/-/g, " ");
-      const searchFallbackUrl = `${baseDomain}/${pageSuffix}?s=${encodeURIComponent(fallbackKeyword)}`;
+      const searchFallbackUrl = appendSort(
+        `${baseDomain}/${pageSuffix}?s=${encodeURIComponent(fallbackKeyword)}`
+      );
 
-      // Chạy song song các đường dẫn ứng viên (không bật proxy cho link thử nghiệm để phản hồi dưới 1 giây)
       const urlList = [...candidateUrls].slice(0, 4);
       const parallelResults = await Promise.all(
         urlList.map(async (u) => {
           const { html } = await fetchHtmlWithFallback(u, reqHeaders, false);
           if (!html) return null;
-          const items = parseVideoListHtml(
+          const rawItems = parseVideoListHtml(
             html,
             baseDomain,
             baseHost,
             cleanCat
           );
-          if (items.length === 0) return null;
+          if (rawItems.length === 0) return null;
           return {
-            items,
+            items: sortVideoItems(rawItems, sortBy),
             totalPages: extractTotalPagesFromHtml(html, page),
             categories: extractNavCategories(html, baseDomain, baseHost)
           };
@@ -1539,18 +1640,15 @@ export async function GET(req) {
         );
       }
 
-      // 2e. Nếu danh mục đó không có trang archive riêng (như Video của thành viên), lấy ngay từ nhánh tìm kiếm
       const { html: searchHtml } = await fetchHtmlWithFallback(
         searchFallbackUrl,
         reqHeaders,
         true
       );
       if (searchHtml) {
-        const sItems = parseVideoListHtml(
-          searchHtml,
-          baseDomain,
-          baseHost,
-          cleanCat
+        const sItems = sortVideoItems(
+          parseVideoListHtml(searchHtml, baseDomain, baseHost, cleanCat),
+          sortBy
         );
         if (sItems.length > 0) {
           const sTotalPages = extractTotalPagesFromHtml(searchHtml, page);
@@ -1570,7 +1668,6 @@ export async function GET(req) {
     }
   } catch (_) {}
 
-  // Fallback cuối cùng: Dữ liệu JSON nội bộ
   const filtered = data.filter(
     (v) =>
       (category === "all" || v.category === category) &&
