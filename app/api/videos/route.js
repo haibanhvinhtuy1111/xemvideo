@@ -7,8 +7,8 @@ export const dynamic = "force-dynamic";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type"
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Range"
 };
 
 const DEFAULT_DOMAIN =
@@ -125,6 +125,36 @@ function decodeBase64Safe(str = "") {
   return "";
 }
 
+function unpackPacker(html = "") {
+  let unpacked = "";
+  const packerRegex =
+    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\.split\(['"]\|['"]\)/gi;
+  let m;
+  while ((m = packerRegex.exec(html)) !== null) {
+    try {
+      let p = m[2];
+      const a = parseInt(m[3], 10);
+      let c = parseInt(m[4], 10);
+      const k = m[6].split("|");
+      const encodeBase = (num) => {
+        const chars =
+          "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        return (
+          (num < a ? "" : encodeBase(Math.floor(num / a))) +
+          (num % a > 35 ? String.fromCharCode((num % a) + 29) : chars[num % a])
+        );
+      };
+      while (c--) {
+        if (k[c]) {
+          p = p.replace(new RegExp("\\b" + encodeBase(c) + "\\b", "g"), k[c]);
+        }
+      }
+      unpacked += "\n" + p;
+    } catch (_) {}
+  }
+  return unpacked;
+}
+
 function isStaticAsset(url = "") {
   const clean = url.split("?")[0].toLowerCase();
   if (
@@ -163,12 +193,11 @@ function normalizeUrl(raw = "", baseDomain = "") {
   return u;
 }
 
-// 1. Lấy danh sách các nút Server (.video2-btn) và khung .movieLoader của Viet69
+// 1. Lấy danh sách các nút Server (.video2-btn / .movieLoader) trên Viet69
 function extractViet69Servers(html = "") {
   const servers = [];
   const seen = new Set();
 
-  // Quét các nút <button class="video2-btn" data-type="..." data-video="...">
   const btnRegex =
     /<button[^>]*class=["'][^"']*video2-btn[^"']*["'][^>]*>([\s\S]*?)<\/button>/gi;
   let m;
@@ -193,7 +222,6 @@ function extractViet69Servers(html = "") {
     }
   }
 
-  // Quét thêm thẻ .movieLoader nếu bài viết không hiển thị nút bấm chuyển server
   const loaderRegex =
     /<div[^>]*class=["'][^"']*movieLoader\b[^"']*["'][^>]*>/gi;
   let idx = 1;
@@ -222,16 +250,20 @@ function extractViet69Servers(html = "") {
   return servers;
 }
 
-// 2. Bóc tách link phát từ kết quả HTML trả về của /get.video.php hoặc /get.xvideo.php
-function parseGetVideoHtml(ajaxHtml = "", baseDomain = "") {
-  if (!ajaxHtml) return [];
-  let buffer = String(ajaxHtml)
+// 2. Phân tích HTML trả về từ /get.video.php hoặc trang nhúng
+function parsePlayerHtml(rawHtml = "", baseDomain = "") {
+  if (!rawHtml) return [];
+  let buffer = String(rawHtml)
     .replace(/\\\//g, "/")
+    .replace(/\\x([0-9A-Fa-f]{2})/g, (_, hex) =>
+      String.fromCharCode(parseInt(hex, 16))
+    )
     .replace(/\\u0026/gi, "&")
     .replace(/&amp;/g, "&")
     .trim();
 
-  // Giải mã nếu phản hồi có chứa chuỗi Base64
+  buffer += "\n" + unpackPacker(buffer);
+
   const b64Regex = /([A-Za-z0-9+/]{24,}={0,2})/g;
   let bm;
   while ((bm = b64Regex.exec(buffer)) !== null) {
@@ -259,13 +291,11 @@ function parseGetVideoHtml(ajaxHtml = "", baseDomain = "") {
     results.push({ url: u, type });
   };
 
-  // Nếu phản hồi là một URL thuần túy
   if (/^https?:\/\/[^\s"'<>]+$/i.test(buffer)) {
     addUrl(buffer);
     return results;
   }
 
-  // Quét các thẻ <iframe>, <video>, <source>, <embed> trong kết quả trả về
   const tagRegex = /<(iframe|video|source|embed|object)\b[^>]*>/gi;
   const attrs = [
     "data-litespeed-src",
@@ -290,21 +320,23 @@ function parseGetVideoHtml(ajaxHtml = "", baseDomain = "") {
     }
   }
 
-  // Quét các thuộc tính cấu hình JS (file, source, src, url, embed_url, hls, mp4)
   const jsFieldRegex =
-    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|video_url|stream_url|hls|mp4)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
+    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|video_url|videoSource|securedLink|stream_url|hls|mp4)["']?)\s*:\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+)["']/gi;
   while ((m = jsFieldRegex.exec(buffer)) !== null) {
-    addUrl(m[1]);
+    const fieldCall = m[0].toLowerCase();
+    const isHlsField =
+      fieldCall.includes("videosource") ||
+      fieldCall.includes("securedlink") ||
+      fieldCall.includes("hls");
+    addUrl(m[1], isHlsField ? "hls" : "");
   }
 
-  // Quét trực tiếp link .m3u8 / .mp4
   (
     buffer.match(
       /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\]*)?/gi
     ) || []
   ).forEach((u) => addUrl(u));
 
-  // Nếu chưa thấy, lấy bất kỳ URL http(s) nào xuất hiện trong phản hồi của get.video.php
   if (results.length === 0) {
     const anyUrls = buffer.match(/https?:\/\/[^\s"'<>\\]+/gi) || [];
     for (const u of anyUrls) {
@@ -315,7 +347,159 @@ function parseGetVideoHtml(ajaxHtml = "", baseDomain = "") {
   return results;
 }
 
-// 3. Gọi trực tiếp POST /get.video.php (hoặc /get.xvideo.php khi type == 10) giống hệt playCoverVideo
+// 3. Đi xuyên vào bên trong trang Iframe (FirePlayer / JWPlayer / Embed) để lấy luồng .m3u8 trực tiếp
+async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
+  const directStreams = [];
+  let embedSnippet = "";
+
+  try {
+    const embedUrlObj = new URL(iframeUrl);
+    const embedOrigin = embedUrlObj.origin;
+    const embedHost = embedUrlObj.hostname;
+
+    const res = await fetchWithTimeout(
+      iframeUrl,
+      {
+        headers: {
+          ...BROWSER_HEADERS,
+          Referer: postLink
+        }
+      },
+      5500
+    );
+
+    let embedCookies = "";
+    const setCookie = res.headers.get("set-cookie");
+    if (setCookie) {
+      embedCookies = setCookie
+        .split(/,(?=\s*[a-zA-Z0-9_-]+=)/)
+        .map((c) => c.split(";")[0].trim())
+        .join("; ");
+    }
+
+    const html = await res.text();
+    embedSnippet = html
+      .replace(/\s+/g, " ")
+      .slice(0, 350);
+
+    // 3a. Quét trực tiếp .m3u8 / .mp4 (kể cả trong Packer JS hoặc Base64)
+    const parsedInner = parsePlayerHtml(html, embedOrigin);
+    for (const item of parsedInner) {
+      if (item.type === "hls" || item.type === "mp4") {
+        directStreams.push({
+          url: item.url,
+          type: item.type,
+          referer: iframeUrl
+        });
+      }
+    }
+
+    // 3b. Kiểm tra cơ chế FirePlayer / JWPlayer (POST /player/index.php?data=<hash>&do=getVideo)
+    const fireMatch =
+      html.match(/FirePlayer\s*\(\s*["']([a-zA-Z0-9_-]+)["']/i) ||
+      html.match(/player\/index\.php\?data=([a-zA-Z0-9_-]+)/i) ||
+      iframeUrl.match(/\/(?:v|e|embed|play|video)\/([a-zA-Z0-9_-]{8,})/i) ||
+      iframeUrl.match(/[?&](?:id|v|data)=([a-zA-Z0-9_-]{8,})/i);
+
+    if (fireMatch && fireMatch[1]) {
+      const hash = fireMatch[1];
+      const fireApiUrl = `${embedOrigin}/player/index.php?data=${encodeURIComponent(hash)}&do=getVideo`;
+      try {
+        const fireRes = await fetchWithTimeout(
+          fireApiUrl,
+          {
+            method: "POST",
+            headers: {
+              ...BROWSER_HEADERS,
+              Origin: embedOrigin,
+              Referer: iframeUrl,
+              "Content-Type":
+                "application/x-www-form-urlencoded; charset=UTF-8",
+              "X-Requested-With": "XMLHttpRequest",
+              ...(embedCookies ? { Cookie: embedCookies } : {})
+            },
+            body: `hash=${encodeURIComponent(hash)}&r=${encodeURIComponent(baseDomain + "/")}`
+          },
+          4500
+        );
+
+        if (fireRes.ok) {
+          const fireText = await fireRes.text();
+          embedSnippet += ` | FireAPI: ${fireText.slice(0, 200)}`;
+          try {
+            const fireJson = JSON.parse(fireText);
+            const streamUrl =
+              fireJson.securedLink ||
+              fireJson.videoSource ||
+              fireJson.file ||
+              fireJson.hls ||
+              "";
+            if (streamUrl && streamUrl.startsWith("http")) {
+              directStreams.unshift({
+                url: streamUrl,
+                type: streamUrl.includes(".mp4") ? "mp4" : "hls",
+                referer: iframeUrl
+              });
+            }
+          } catch (_) {
+            const extra = parsePlayerHtml(fireText, embedOrigin);
+            for (const x of extra) {
+              if (x.type === "hls" || x.type === "mp4") {
+                directStreams.unshift({
+                  url: x.url,
+                  type: x.type,
+                  referer: iframeUrl
+                });
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      // 3c. Kiểm tra chuẩn Fembed / Short.ink (POST /api/source/<hash>)
+      if (directStreams.length === 0 && html.includes("/api/source/")) {
+        try {
+          const apiRes = await fetchWithTimeout(
+            `${embedOrigin}/api/source/${encodeURIComponent(hash)}`,
+            {
+              method: "POST",
+              headers: {
+                ...BROWSER_HEADERS,
+                Origin: embedOrigin,
+                Referer: iframeUrl,
+                "Content-Type":
+                  "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest"
+              },
+              body: `r=${encodeURIComponent(baseDomain + "/")}&d=${encodeURIComponent(embedHost)}`
+            },
+            4500
+          );
+          if (apiRes.ok) {
+            const apiJson = await apiRes.json();
+            if (Array.isArray(apiJson?.data)) {
+              for (const item of apiJson.data) {
+                if (item.file) {
+                  directStreams.push({
+                    url: item.file,
+                    type: item.type === "mp4" || item.file.includes(".mp4") ? "mp4" : "hls",
+                    referer: iframeUrl
+                  });
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+  } catch (err) {
+    embedSnippet = `HopError: ${err.message}`;
+  }
+
+  return { directStreams, embedSnippet };
+}
+
+// 4. Gọi POST /get.video.php (hoặc /get.xvideo.php khi type == 10) và bóc tách sâu
 async function fetchViet69PlayerUrl({
   baseDomain,
   postLink,
@@ -349,25 +533,51 @@ async function fetchViet69PlayerUrl({
     );
 
     const text = await res.text();
-    const parsed = parseGetVideoHtml(text, baseDomain);
-    if (parsed.length > 0) {
-      return { items: parsed, rawResponse: text.slice(0, 500) };
+    let parsed = parsePlayerHtml(text, baseDomain);
+
+    if (parsed.length === 0) {
+      const getRes = await fetchWithTimeout(
+        `${targetUrl}?${body}`,
+        { method: "GET", headers: ajaxHeaders },
+        5000
+      );
+      const getText = await getRes.text();
+      parsed = parsePlayerHtml(getText, baseDomain);
     }
 
-    // Nếu POST trả về rỗng, thử gọi GET kèm query string phòng trường hợp cấu hình server đổi
-    const getRes = await fetchWithTimeout(
-      `${targetUrl}?${body}`,
-      {
-        method: "GET",
-        headers: ajaxHeaders
-      },
-      5000
-    );
-    const getText = await getRes.text();
-    const getParsed = parseGetVideoHtml(getText, baseDomain);
+    const enrichedItems = [];
+    let hopLog = "";
+
+    for (const item of parsed) {
+      if (item.type === "iframe") {
+        // Quét xuyên vào trong iframe để lấy luồng HLS/MP4 trực tiếp
+        const { directStreams, embedSnippet } = await resolveEmbedPage(
+          item.url,
+          postLink,
+          baseDomain
+        );
+        if (embedSnippet) hopLog += ` -> ${embedSnippet}`;
+
+        for (const ds of directStreams) {
+          enrichedItems.push({
+            url: ds.url,
+            type: ds.type,
+            referer: ds.referer || item.url,
+            isDirectResolved: true
+          });
+        }
+      }
+      enrichedItems.push({
+        url: item.url,
+        type: item.type,
+        referer: postLink,
+        isDirectResolved: false
+      });
+    }
+
     return {
-      items: getParsed,
-      rawResponse: (text || getText).slice(0, 500)
+      items: enrichedItems,
+      rawResponse: `${text.slice(0, 250)}${hopLog}`
     };
   } catch (err) {
     return { items: [], rawResponse: `Error: ${err.message}` };
@@ -376,6 +586,151 @@ async function fetchViet69PlayerUrl({
 
 export async function GET(req) {
   const sp = req.nextUrl.searchParams;
+
+  // =================================================================
+  // CHẾ ĐỘ A: PROXY LUỒNG HLS (.m3u8 / .ts) VƯỢT CHẶN REFERER & CORS
+  // =================================================================
+  if (sp.get("hlsProxy") === "1") {
+    const targetUrl = sp.get("url");
+    const referer = sp.get("referer") || `${DEFAULT_DOMAIN}/`;
+    if (!targetUrl) {
+      return new NextResponse("Missing url", { status: 400, headers: CORS });
+    }
+    try {
+      const refOrigin = new URL(referer).origin;
+      const upstream = await fetchWithTimeout(
+        targetUrl,
+        {
+          headers: {
+            ...BROWSER_HEADERS,
+            Origin: refOrigin,
+            Referer: referer
+          }
+        },
+        9000
+      );
+
+      const contentType = (
+        upstream.headers.get("content-type") || ""
+      ).toLowerCase();
+      const buffer = await upstream.arrayBuffer();
+      const firstBytes = Buffer.from(buffer.slice(0, 16)).toString("utf-8");
+
+      // Nếu là file danh sách phát M3U8 (#EXTM3U), viết lại các đường dẫn con qua Proxy
+      if (
+        firstBytes.startsWith("#EXTM3U") ||
+        contentType.includes("mpegurl") ||
+        targetUrl.includes(".m3u8")
+      ) {
+        const text = Buffer.from(buffer).toString("utf-8");
+        const rewritten = text
+          .split(/\r?\n/)
+          .map((line) => {
+            const trimmed = line.trim();
+            if (!trimmed) return line;
+            if (trimmed.startsWith("#")) {
+              return line.replace(/URI=["']([^"']+)["']/gi, (_, uri) => {
+                try {
+                  const abs = new URL(uri, targetUrl).toString();
+                  return `URI="/api/videos?hlsProxy=1&url=${encodeURIComponent(abs)}&referer=${encodeURIComponent(referer)}"`;
+                } catch (_) {
+                  return `URI="${uri}"`;
+                }
+              });
+            }
+            try {
+              const abs = new URL(trimmed, targetUrl).toString();
+              return `/api/videos?hlsProxy=1&url=${encodeURIComponent(abs)}&referer=${encodeURIComponent(referer)}`;
+            } catch (_) {
+              return line;
+            }
+          })
+          .join("\n");
+
+        return new NextResponse(rewritten, {
+          status: 200,
+          headers: {
+            ...CORS,
+            "Content-Type": "application/vnd.apple.mpegurl",
+            "Cache-Control": "no-store"
+          }
+        });
+      }
+
+      return new NextResponse(buffer, {
+        status: upstream.status,
+        headers: {
+          ...CORS,
+          "Content-Type":
+            upstream.headers.get("content-type") || "video/mp2t",
+          "Cache-Control": "public, max-age=3600"
+        }
+      });
+    } catch (err) {
+      return new NextResponse(err.message, { status: 502, headers: CORS });
+    }
+  }
+
+  // =================================================================
+  // CHẾ ĐỘ B: PROXY TRANG NHÚNG IFRAME (GIẢ LẬP DOCUMENT.REFERRER = VIET69)
+  // =================================================================
+  if (sp.get("embedProxy") === "1") {
+    const targetUrl = sp.get("url");
+    const referer = sp.get("referer") || `${DEFAULT_DOMAIN}/`;
+    if (!targetUrl) {
+      return new NextResponse("Missing url", { status: 400, headers: CORS });
+    }
+    try {
+      const upstream = await fetchWithTimeout(
+        targetUrl,
+        {
+          headers: {
+            ...BROWSER_HEADERS,
+            Referer: referer
+          }
+        },
+        8000
+      );
+      let html = await upstream.text();
+      const targetOrigin = new URL(targetUrl).origin;
+      const injectHead = `
+        <base href="${targetUrl}">
+        <meta name="referrer" content="no-referrer">
+        <style>html,body{margin:0!important;padding:0!important;width:100%!important;height:100%!important;overflow:hidden!important;background:#000!important;}</style>
+        <script>
+          try {
+            Object.defineProperty(document, 'referrer', { get: function() { return '${referer}'; } });
+            Object.defineProperty(window, 'top', { get: function() { return window.self; } });
+            Object.defineProperty(window, 'parent', { get: function() { return window.self; } });
+          } catch (e) {}
+        </script>
+      `;
+      if (/<head[^>]*>/i.test(html)) {
+        html = html.replace(/<head[^>]*>/i, (m) => `${m}${injectHead}`);
+      } else {
+        html = `${injectHead}${html}`;
+      }
+      // Chuyển các đường dẫn gốc tương đối sang tuyệt đối
+      html = html.replace(
+        /\b(src|href)=["']\/(?!\/)([^"']*)["']/gi,
+        `$1="${targetOrigin}/$2"`
+      );
+
+      return new NextResponse(html, {
+        status: 200,
+        headers: {
+          ...CORS,
+          "Content-Type": "text/html; charset=utf-8"
+        }
+      });
+    } catch (err) {
+      return new NextResponse(err.message, { status: 502, headers: CORS });
+    }
+  }
+
+  // =================================================================
+  // CHẾ ĐỘ C: API LẤY THÔNG TIN VIDEO & DANH SÁCH BÀI VIẾT
+  // =================================================================
   const slug = sp.get("slug");
   const category = sp.get("category") || "all";
   const q = (sp.get("q") || "").trim();
@@ -416,9 +771,6 @@ export async function GET(req) {
 
   const reqHeaders = { ...BROWSER_HEADERS, Referer: `${baseDomain}/` };
 
-  // =================================================================
-  // TRƯỜNG HỢP 1: LẤY CHI TIẾT VIDEO THEO SLUG (?slug=...)
-  // =================================================================
   if (slug) {
     const cleanSlug = slug.replace(/^\/+|\/+$/g, "");
     const localVideo = data.find(
@@ -455,11 +807,9 @@ export async function GET(req) {
         );
         if (ogImg) thumbnail = ogImg[1];
 
-        // 1. Lấy danh sách các nút Server (.video2-btn / .movieLoader)
         const servers = extractViet69Servers(pageHtml);
         debugInfo.servers = servers;
 
-        // 2. Gọi song song POST /get.video.php (hoặc /get.xvideo.php) cho tất cả các Server
         if (servers.length > 0) {
           const ajaxResults = await Promise.all(
             servers.map((srv) =>
@@ -479,18 +829,38 @@ export async function GET(req) {
             if (res.rawResponse) {
               rawSnippets.push(`[${srv.label}]: ${res.rawResponse}`);
             }
+
             for (const mediaItem of res.items) {
-              customSources.push({
-                label: srv.label,
-                name: srv.label,
-                url: mediaItem.url,
-                src: mediaItem.url,
-                type: mediaItem.type
-              });
-              if (mediaItem.type === "iframe") {
-                allIframes.push(mediaItem.url);
-              } else {
+              if (mediaItem.type === "hls" || mediaItem.type === "mp4") {
                 allStreams.push(mediaItem.url);
+                const proxyStreamUrl = `/api/videos?hlsProxy=1&url=${encodeURIComponent(mediaItem.url)}&referer=${encodeURIComponent(mediaItem.referer || postLink)}`;
+                customSources.push({
+                  label: `${srv.label} (VIP)`,
+                  name: `${srv.label} (VIP)`,
+                  url: mediaItem.url,
+                  src: mediaItem.url,
+                  proxyUrl: proxyStreamUrl,
+                  referer: mediaItem.referer || postLink,
+                  type: mediaItem.type
+                });
+              } else {
+                allIframes.push(mediaItem.url);
+                const proxyEmbedUrl = `/api/videos?embedProxy=1&url=${encodeURIComponent(mediaItem.url)}&referer=${encodeURIComponent(postLink)}`;
+                customSources.push({
+                  label: srv.label,
+                  name: srv.label,
+                  url: mediaItem.url,
+                  src: mediaItem.url,
+                  proxyUrl: proxyEmbedUrl,
+                  type: "iframe"
+                });
+                customSources.push({
+                  label: `${srv.label} (Proxy)`,
+                  name: `${srv.label} (Proxy)`,
+                  url: proxyEmbedUrl,
+                  src: proxyEmbedUrl,
+                  type: "iframe"
+                });
               }
             }
           });
@@ -500,9 +870,8 @@ export async function GET(req) {
           }
         }
 
-        // 3. Nếu bài viết nhúng trực tiếp video không qua nút .video2-btn
         if (customSources.length === 0) {
-          const directParsed = parseGetVideoHtml(pageHtml, baseDomain).filter(
+          const directParsed = parsePlayerHtml(pageHtml, baseDomain).filter(
             (x) =>
               !x.url.includes(baseHost) && !x.url.includes("viet69")
           );
@@ -520,14 +889,18 @@ export async function GET(req) {
         }
       }
 
+      // Ưu tiên đưa các luồng Direct HLS/MP4 (VIP) lên đầu để tự động phát ngay
+      customSources.sort((a, b) => {
+        const aDirect = a.type === "hls" || a.type === "mp4" ? 0 : 1;
+        const bDirect = b.type === "hls" || b.type === "mp4" ? 0 : 1;
+        return aDirect - bDirect;
+      });
+
       const streams = [...new Set(allStreams)];
       const iframes = [...new Set(allIframes)];
-      const primaryUrl = streams[0] || iframes[0] || "";
-      const primaryType = streams[0]
-        ? streams[0].includes(".m3u8")
-          ? "hls"
-          : "mp4"
-        : "iframe";
+      const primarySource = customSources[0] || null;
+      const primaryUrl = primarySource?.url || streams[0] || iframes[0] || "";
+      const primaryType = primarySource?.type || (streams[0] ? "hls" : "iframe");
 
       return NextResponse.json(
         {
@@ -540,7 +913,7 @@ export async function GET(req) {
           url: primaryUrl,
           src: primaryUrl,
           videoUrl: streams[0] || primaryUrl,
-          hlsUrl: streams.find((s) => s.includes(".m3u8")) || "",
+          hlsUrl: streams[0] || "",
           mp4Url: streams.find((s) => s.includes(".mp4")) || "",
           embedUrl: iframes[0] || "",
           iframe: iframes[0] || "",
@@ -561,9 +934,7 @@ export async function GET(req) {
     }
   }
 
-  // =================================================================
-  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO THEO TRANG
-  // =================================================================
+  // DANH SÁCH VIDEO THEO TRANG
   try {
     const wpUrl = `${baseDomain}/wp-json/wp/v2/posts?_embed&page=${page}&per_page=${per}${
       q ? `&search=${encodeURIComponent(q)}` : ""
