@@ -86,7 +86,17 @@ export default function HomePage() {
 
   const sortDropdownRef = useRef(null);
 
-  // Đóng menu Sắp xếp khi bấm ra ngoài
+  // Nhận tham số ?category=... nếu người dùng bấm vào Tag từ trang xem video
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const sp = new URLSearchParams(window.location.search);
+      const urlCat = sp.get("category");
+      if (urlCat) {
+        setCategory(urlCat);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (
@@ -149,6 +159,9 @@ export default function HomePage() {
     setSearchInput("");
     setPage(1);
     setShowMoreTags(false);
+    if (typeof window !== "undefined" && window.location.search) {
+      window.history.replaceState(null, "", "/");
+    }
   };
 
   const handleSearchSubmit = (e) => {
@@ -184,19 +197,19 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-[#0f172a] text-slate-100">
-      {/* Thanh điều hướng & Tìm kiếm nhẹ nhàng, tinh gọn */}
-      <div className="sticky top-0 z-20 border-b border-slate-800/80 bg-[#0f172a]/85 backdrop-blur-md">
-        <div className="max-w-6xl mx-auto px-4 py-3.5 space-y-3">
-          {/* Ô tìm kiếm bo tròn thanh lịch */}
+      {/* Thanh điều hướng dính (Sticky) gọn nhẹ trên điện thoại */}
+      <div className="sticky top-0 z-20 border-b border-slate-800/80 bg-[#0f172a]/90 backdrop-blur-md">
+        <div className="max-w-6xl mx-auto px-3 sm:px-4 py-2.5 sm:py-3.5 space-y-2.5">
+          {/* Ô tìm kiếm: dùng text-base (16px) trên mobile để iPhone không tự zoom */}
           <form
             onSubmit={handleSearchSubmit}
-            className="flex items-center max-w-lg mx-auto rounded-full border border-slate-700/80 bg-slate-900/90 px-4 py-1.5 focus-within:border-indigo-400/80 focus-within:ring-2 focus-within:ring-indigo-500/15 transition-all"
+            className="flex items-center max-w-lg mx-auto rounded-full border border-slate-700/80 bg-slate-900/90 px-3.5 py-1.5 focus-within:border-indigo-400/80 transition-all"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 20 20"
               fill="currentColor"
-              className="w-4 h-4 text-slate-400 mr-2.5 shrink-0"
+              className="w-4 h-4 text-slate-400 mr-2 shrink-0"
             >
               <path
                 fillRule="evenodd"
@@ -209,7 +222,7 @@ export default function HomePage() {
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               placeholder="Tìm kiếm video..."
-              className="w-full bg-transparent text-sm text-slate-100 placeholder-slate-400 outline-none"
+              className="w-full bg-transparent text-base sm:text-sm text-slate-100 placeholder-slate-400 outline-none"
             />
             {searchInput && (
               <button
@@ -234,8 +247,8 @@ export default function HomePage() {
             </button>
           </form>
 
-          {/* Danh mục dạng Pill mềm mại */}
-          <nav className="flex items-center justify-center flex-wrap gap-1.5 pt-0.5">
+          {/* Thanh danh mục: Vuốt ngang mượt trên điện thoại, tự xuống dòng trên máy tính */}
+          <nav className="flex items-center sm:justify-center overflow-x-auto sm:flex-wrap gap-1.5 pb-1 sm:pb-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {MAIN_CATEGORIES.map((cat) => {
               const isActive = !q && category === cat.slug;
               return (
@@ -243,7 +256,7 @@ export default function HomePage() {
                   key={cat.slug}
                   type="button"
                   onClick={() => handleSelectCategory(cat.slug)}
-                  className={`px-3.5 py-1.5 rounded-full text-xs md:text-[13px] font-medium transition-all flex items-center gap-1.5 ${
+                  className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs sm:text-[13px] font-medium transition-all flex items-center gap-1.5 ${
                     isActive
                       ? "bg-indigo-500 text-white shadow-sm shadow-indigo-500/30"
                       : "bg-slate-800/60 text-slate-300 hover:bg-slate-800 hover:text-white border border-slate-700/40"
@@ -269,7 +282,7 @@ export default function HomePage() {
               type="button"
               onClick={() => setShowMoreTags(!showMoreTags)}
               title="Xem thêm thẻ"
-              className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
+              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
                 showMoreTags
                   ? "bg-indigo-500/20 border-indigo-500/40 text-indigo-300"
                   : "bg-slate-800/60 border-slate-700/40 text-slate-300 hover:bg-slate-800 hover:text-white"
@@ -279,9 +292,8 @@ export default function HomePage() {
             </button>
           </nav>
 
-          {/* Khung mở rộng các thẻ Tags */}
           {showMoreTags && (
-            <div className="pt-2.5 pb-1 border-t border-slate-800/80 flex flex-wrap items-center justify-center gap-1.5">
+            <div className="pt-2 pb-1 border-t border-slate-800/80 flex flex-wrap items-center justify-center gap-1.5 max-h-40 overflow-y-auto">
               {mergedExtraTags.map((tag) => {
                 const isActive = !q && category === tag.slug;
                 return (
@@ -304,33 +316,33 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* Khu vực nội dung chính */}
-      <div className="max-w-6xl mx-auto px-4 py-6">
-        {/* Thanh tiêu đề danh mục + Bộ lọc "Sắp xếp theo" */}
-        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <span className="inline-block w-1.5 h-5 rounded-full bg-indigo-400" />
-            <h2 className="text-base md:text-lg font-semibold text-slate-100">
+      {/* Khu vực danh sách Video */}
+      <div className="max-w-6xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
+        <div className="mb-4 sm:mb-6 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="inline-block w-1.5 h-5 rounded-full bg-indigo-400 shrink-0" />
+            <h2 className="text-sm sm:text-lg font-semibold text-slate-100 truncate">
               {q
-                ? `Kết quả tìm kiếm: "${q}"`
+                ? `Tìm kiếm: "${q}"`
                 : MAIN_CATEGORIES.find((c) => c.slug === category)?.name ||
                   mergedExtraTags.find((t) => t.slug === category)?.name ||
-                  "Danh sách Video"}
+                  category.replace(/^tag\/|^category\//, "#")}
             </h2>
-            <span className="text-xs text-slate-400 font-normal ml-1">
-              (Trang {page.toLocaleString("en-US")}/
-              {totalPages.toLocaleString("en-US")})
+            <span className="text-[11px] sm:text-xs text-slate-400 shrink-0">
+              ({page}/{totalPages})
             </span>
           </div>
 
-          {/* Menu thả xuống: Sắp xếp theo Mới nhất / Lượt xem / Lượt thích / Bình luận */}
-          <div className="relative" ref={sortDropdownRef}>
+          {/* Menu Sắp xếp theo */}
+          <div className="relative shrink-0" ref={sortDropdownRef}>
             <button
               type="button"
               onClick={() => setSortOpen(!sortOpen)}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-800/70 hover:bg-slate-800 border border-slate-700/60 px-3.5 py-2 text-xs md:text-sm text-slate-300 transition"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-800/70 hover:bg-slate-800 border border-slate-700/60 px-2.5 sm:px-3.5 py-1.5 sm:py-2 text-xs text-slate-300 transition"
             >
-              <span className="text-slate-400">Sắp xếp theo</span>
+              <span className="text-slate-400 hidden sm:inline">
+                Sắp xếp theo
+              </span>
               <span className="font-semibold text-white">
                 {currentSortLabel}
               </span>
@@ -338,7 +350,7 @@ export default function HomePage() {
                 xmlns="http://www.w3.org/2000/svg"
                 viewBox="0 0 20 20"
                 fill="currentColor"
-                className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${
+                className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${
                   sortOpen ? "rotate-180" : ""
                 }`}
               >
@@ -351,7 +363,7 @@ export default function HomePage() {
             </button>
 
             {sortOpen && (
-              <div className="absolute right-0 mt-2 w-44 rounded-xl bg-[#1e293b] border border-slate-700/80 py-1.5 shadow-xl shadow-black/40 z-30">
+              <div className="absolute right-0 mt-1.5 w-40 rounded-xl bg-[#1e293b] border border-slate-700/80 py-1.5 shadow-xl shadow-black/40 z-30">
                 {SORT_OPTIONS.map((opt) => {
                   const active = sortBy === opt.id;
                   return (
@@ -363,7 +375,7 @@ export default function HomePage() {
                         setSortOpen(false);
                         setPage(1);
                       }}
-                      className={`w-full text-left px-4 py-2 text-sm transition-colors flex items-center justify-between ${
+                      className={`w-full text-left px-3.5 py-2 text-xs sm:text-sm transition-colors flex items-center justify-between ${
                         active
                           ? "text-indigo-400 font-semibold bg-indigo-500/10"
                           : "text-slate-200 hover:bg-slate-800/80 hover:text-white"
@@ -381,29 +393,24 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* Lưới hiển thị Video */}
+        {/* Lưới Video: 2 cột trên điện thoại, 3-4 cột trên máy tính */}
         {loading ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5">
+          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
             {Array.from({ length: 12 }).map((_, i) => (
               <div
                 key={i}
                 className="rounded-2xl bg-slate-800/35 border border-slate-800/70 overflow-hidden animate-pulse"
               >
                 <div className="aspect-video w-full bg-slate-800/70" />
-                <div className="p-3.5 space-y-2.5">
-                  <div className="h-3.5 bg-slate-800 rounded w-11/12" />
-                  <div className="h-3.5 bg-slate-800 rounded w-2/3" />
-                  <div className="pt-2 flex gap-4">
-                    <div className="h-3 bg-slate-800 rounded w-12" />
-                    <div className="h-3 bg-slate-800 rounded w-8" />
-                    <div className="h-3 bg-slate-800 rounded w-8" />
-                  </div>
+                <div className="p-2.5 sm:p-3.5 space-y-2">
+                  <div className="h-3 bg-slate-800 rounded w-11/12" />
+                  <div className="h-3 bg-slate-800 rounded w-2/3" />
                 </div>
               </div>
             ))}
           </div>
         ) : items.length === 0 ? (
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-12 text-center space-y-3">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-10 text-center space-y-3">
             <p className="text-slate-400 text-sm">
               Không tìm thấy video nào trong mục này.
             </p>
@@ -416,18 +423,18 @@ export default function HomePage() {
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5">
+          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
             {items.map((item, idx) => (
               <VideoCard key={item.slug || item.id || idx} video={item} />
             ))}
           </div>
         )}
 
-        {/* Thanh phân trang hài hòa, dễ bấm */}
+        {/* Thanh phân trang tối ưu nút bấm cho cả điện thoại & máy tính */}
         {!loading && items.length > 0 && totalPages > 1 && (
-          <div className="mt-12 pt-6 border-t border-slate-800/80 flex flex-col items-center gap-4">
+          <div className="mt-10 pt-6 border-t border-slate-800/80 flex flex-col items-center gap-4">
             <div className="flex flex-wrap items-center justify-center gap-1.5">
-              <span className="px-3 py-1.5 rounded-lg bg-slate-800/70 border border-slate-700/60 text-xs font-medium text-slate-300">
+              <span className="px-2.5 py-1.5 rounded-lg bg-slate-800/70 border border-slate-700/60 text-xs font-medium text-slate-300">
                 Page {page.toLocaleString("en-US")} of{" "}
                 {totalPages.toLocaleString("en-US")}
               </span>
@@ -455,7 +462,7 @@ export default function HomePage() {
                 tok === "..." ? (
                   <span
                     key={`dots-${idx}`}
-                    className="px-2 py-1.5 text-xs text-slate-500 select-none"
+                    className="px-1.5 py-1.5 text-xs text-slate-500 select-none"
                   >
                     ...
                   </span>
@@ -507,11 +514,11 @@ export default function HomePage() {
                 value={jumpPageInput}
                 onChange={(e) => setJumpPageInput(e.target.value)}
                 placeholder={`1 - ${totalPages}`}
-                className="w-24 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-100 outline-none focus:border-indigo-400"
+                className="w-24 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-base sm:text-xs text-slate-100 outline-none focus:border-indigo-400"
               />
               <button
                 type="submit"
-                className="rounded-lg bg-slate-800 hover:bg-indigo-500 px-3 py-1 text-xs font-medium text-slate-200 hover:text-white transition"
+                className="rounded-lg bg-slate-800 hover:bg-indigo-500 px-3.5 py-1.5 sm:py-1 text-xs font-medium text-slate-200 hover:text-white transition"
               >
                 Đi
               </button>
