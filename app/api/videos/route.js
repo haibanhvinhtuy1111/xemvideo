@@ -83,7 +83,6 @@ const PROXY_PREFERRED_HOSTS = [
   "69vn"
 ];
 
-// Phân tách rõ ràng đường dẫn của từng danh mục
 const CATEGORY_MAP = {
   "phim-sex-viet-moi": {
     paths: [
@@ -100,9 +99,11 @@ const CATEGORY_MAP = {
     paths: [
       "video-cua-thanh-vien",
       "bai-viet",
-      "category/video-cua-thanh-vien"
+      "category/video-cua-thanh-vien",
+      "tag/video-cua-thanh-vien",
+      "thanh-vien"
     ],
-    keyword: "bai-viet",
+    keyword: "thành viên",
     isMemberSection: true
   },
   "phim-sex-sinh-vien": {
@@ -141,11 +142,15 @@ const CATEGORY_MAP = {
   }
 };
 
+// Danh sách đầy đủ các link chức năng tài khoản/hệ thống cần chặn tuyệt đối
 const SYSTEM_SLUGS_BLACKLIST = [
   "video-cua-toi",
   "video-da-thich",
   "video-yeu-thich",
   "video-da-xem",
+  "xem-sau",
+  "video-xem-sau",
+  "lich-su",
   "lich-su-xem",
   "dang-video",
   "dang-bai",
@@ -160,6 +165,7 @@ const SYSTEM_SLUGS_BLACKLIST = [
   "submit-video",
   "my-videos",
   "liked-videos",
+  "watch-later",
   "favorite-videos",
   "profile",
   "login",
@@ -169,7 +175,9 @@ const SYSTEM_SLUGS_BLACKLIST = [
   "lien-he",
   "dmca",
   "privacy-policy",
-  "terms"
+  "terms",
+  "trang-chu",
+  "home"
 ];
 
 const SYSTEM_TITLES_BLACKLIST = [
@@ -177,6 +185,9 @@ const SYSTEM_TITLES_BLACKLIST = [
   "video đã thích",
   "video yêu thích",
   "video đã xem",
+  "xem sau",
+  "video xem sau",
+  "lịch sử",
   "lịch sử xem",
   "đăng video",
   "đăng bài",
@@ -189,7 +200,8 @@ const SYSTEM_TITLES_BLACKLIST = [
   "quên mật khẩu",
   "đổi mật khẩu",
   "video thành viên",
-  "video của thành viên"
+  "video của thành viên",
+  "trang chủ"
 ];
 
 const navPathCache = new Map();
@@ -258,7 +270,11 @@ function isSystemLinkOrTitle(slug = "", title = "") {
   ) {
     return true;
   }
-  if (SYSTEM_TITLES_BLACKLIST.some((b) => t === b || t.startsWith(b + " ("))) {
+  if (
+    SYSTEM_TITLES_BLACKLIST.some(
+      (b) => t === b || t.startsWith(b + " (") || t.startsWith(b + " -")
+    )
+  ) {
     return true;
   }
   return false;
@@ -1607,7 +1623,6 @@ async function fetchViet69PlayerUrl({
   };
 }
 
-// Bóc tách tổng số trang: Phân biệt rõ phân trang của mục Video thành viên và mục thường
 function extractTotalPagesFromHtml(
   html = "",
   currentPage = 1,
@@ -1620,7 +1635,6 @@ function extractTotalPagesFromHtml(
   );
   const scopeHtml = navZoneMatch ? navZoneMatch[0] : html;
 
-  // Nếu là mục Video thành viên, kiểm tra trước các link phân trang đặc thù (/bai-viet/page/X, /video-cua-thanh-vien/page/X, ?trang=X)
   if (isMemberCat) {
     let memberMax = currentPage;
     const memberPatterns = [
@@ -1701,23 +1715,17 @@ function getSortQueryString(sortBy = "latest") {
   return defaults[sortBy] || "";
 }
 
-// SỬA LỖI TRỘN MENU: Quét từng thẻ <a> độc lập trong vùng menu, tuyệt đối không dùng [\s\S]*? xuyên qua các thẻ <li>
+// Quét toàn bộ các thẻ <a> ở phần đầu trang để bắt chính xác 100% đường dẫn thật của nút "Video của thành viên"
 function extractNavCategories(html = "", baseDomain = "", baseHost = "") {
   learnSortParamsFromHtml(html);
   const categories = [];
   const seen = new Set();
 
-  // Khoanh vùng khối menu header để tránh quét nhầm link bài viết
-  const navBlockMatch = html.match(
-    /<(?:nav|div|ul)[^>]*(?:id|class)=["']?[^"'>]*(?:main-menu|primary-menu|header-menu|nav-menu|menu-main|navbar)[^"'>]*["']?[^>]*>[\s\S]{0,15000}?<\/(?:nav|div|ul)>/i
-  );
-  const navScope = navBlockMatch ? navBlockMatch[0] : html.slice(0, 25000);
-
-  // Quét từng thẻ <a ...>...</a> riêng biệt (không vượt qua thẻ </a>)
+  const headerScope = html.slice(0, 45000);
   const aRegex =
     /<a\b[^>]*href=(?:["']([^"']+)["']|([^\s>"']+))[^>]*>((?:(?!<\/a>)[\s\S])*)<\/a>/gi;
   let m;
-  while ((m = aRegex.exec(navScope)) !== null) {
+  while ((m = aRegex.exec(headerScope)) !== null) {
     try {
       const rawHref = m[1] || m[2] || "";
       const labelHtml = m[3] || "";
@@ -1731,20 +1739,15 @@ function extractNavCategories(html = "", baseDomain = "", baseHost = "") {
       }
 
       const name = cleanText(labelHtml).replace(/\s*MỚI\s*$/i, "").trim();
-      if (!name || name === "..." || name.length > 35 || seen.has(rawPath)) {
-        continue;
-      }
+      if (!name || name === "..." || name.length > 35) continue;
 
       const labelSlug = toSlugKey(name);
-      if (!labelSlug) continue;
-      seen.add(rawPath);
+      if (!labelSlug || isSystemLinkOrTitle(rawPath, name)) continue;
 
-      // Kiểm tra chéo: Chỉ lưu vào navPathCache khi đường dẫn thực sự khớp với bản chất của mục đó
-      if (labelSlug.includes("thanh-vien")) {
-        if (rawPath.includes("thanh-vien") || rawPath.includes("bai-viet")) {
-          navPathCache.set("video-cua-thanh-vien", rawPath);
-        }
-      } else if (labelSlug.includes("viet-moi")) {
+      // Bắt chính xác link của từng nút trên thanh menu Viet69
+      if (labelSlug.includes("video-cua-thanh-vien") || labelSlug === "video-thanh-vien") {
+        navPathCache.set("video-cua-thanh-vien", rawPath);
+      } else if (labelSlug.includes("phim-sex-viet-moi") || labelSlug === "phim-viet-moi") {
         if (!rawPath.includes("thanh-vien") && !rawPath.includes("bai-viet")) {
           navPathCache.set("phim-sex-viet-moi", rawPath);
         }
@@ -1754,22 +1757,45 @@ function extractNavCategories(html = "", baseDomain = "", baseHost = "") {
         navPathCache.set("may-bay-ba-gia", rawPath);
       } else if (labelSlug.includes("check-hang")) {
         navPathCache.set("check-hang", rawPath);
-      } else {
-        navPathCache.set(labelSlug, rawPath);
       }
 
-      categories.push({
-        name,
-        slug: rawPath,
-        isNew: /mới|new/i.test(labelHtml)
-      });
+      if (
+        !seen.has(rawPath) &&
+        (rawPath.startsWith("category/") ||
+          rawPath.startsWith("tag/") ||
+          CATEGORY_MAP[labelSlug])
+      ) {
+        seen.add(rawPath);
+        categories.push({
+          name,
+          slug: rawPath,
+          isNew: /mới|new/i.test(labelHtml)
+        });
+      }
     } catch (_) {}
   }
 
   return categories;
 }
 
+// Bóc tách ảnh Thumbnail thật: CHẶN TUYỆT ĐỐI ảnh Logo, Icon, Avatar, Banner
 function extractThumbnailFromBlock(block = "", baseDomain = "") {
+  const isInvalidThumbUrl = (u = "") => {
+    const lower = u.toLowerCase();
+    return (
+      !u ||
+      lower.startsWith("data:") ||
+      lower.includes("blank.gif") ||
+      lower.includes("placeholder") ||
+      lower.includes("logo") ||
+      lower.includes("favicon") ||
+      lower.includes("avatar") ||
+      lower.includes("icon") ||
+      lower.includes("/themes/") ||
+      lower.includes("/plugins/")
+    );
+  };
+
   const attrs = [
     "data-litespeed-src",
     "data-lazy-src",
@@ -1786,14 +1812,7 @@ function extractThumbnailFromBlock(block = "", baseDomain = "") {
     let m;
     while ((m = regex.exec(block)) !== null) {
       let val = (m[1] || m[2] || "").trim();
-      if (
-        !val ||
-        val.startsWith("data:") ||
-        val.includes("blank.gif") ||
-        val.includes("placeholder")
-      ) {
-        continue;
-      }
+      if (isInvalidThumbUrl(val)) continue;
       if (val.startsWith("//")) val = `https:${val}`;
       else if (val.startsWith("/") && baseDomain) val = `${baseDomain}${val}`;
 
@@ -1811,9 +1830,11 @@ function extractThumbnailFromBlock(block = "", baseDomain = "") {
   );
   if (bgMatch && bgMatch[1]) {
     let bgUrl = bgMatch[1].trim();
-    if (bgUrl.startsWith("/") && baseDomain) bgUrl = `${baseDomain}${bgUrl}`;
-    if (/\.(?:jpg|jpeg|png|webp|gif|bmp|avif)/i.test(bgUrl)) {
-      return bgUrl;
+    if (!isInvalidThumbUrl(bgUrl)) {
+      if (bgUrl.startsWith("/") && baseDomain) bgUrl = `${baseDomain}${bgUrl}`;
+      if (/\.(?:jpg|jpeg|png|webp|gif|bmp|avif)/i.test(bgUrl)) {
+        return bgUrl;
+      }
     }
   }
 
@@ -1858,7 +1879,7 @@ function extractStatsFromBlock(block = "") {
   };
 }
 
-// Bóc tách danh sách video: Tách biệt nghiêm ngặt giữa "Video thành viên" (bai-viet/...) và các danh mục thường
+// Bóc tách danh sách video đa năng: Hỗ trợ cả cấu trúc <article>, khối div .video-item và mỏ neo <a> chứa <img> (dành cho trang Video thành viên)
 function parseVideoListHtml(
   html = "",
   baseDomain = "",
@@ -1868,40 +1889,37 @@ function parseVideoListHtml(
   const allCandidates = [];
   const seen = new Set();
 
-  const isMemberCat =
-    category === "video-cua-thanh-vien" || category === "bai-viet";
+  // 1. Loại bỏ hoàn toàn phần <header>, <nav>, <footer> và <aside> để không bao giờ quét nhầm Logo hay nút "Xem sau"
+  let mainScope = html
+    .replace(/<header\b[\s\S]*?<\/header>/gi, "")
+    .replace(/<nav\b[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer\b[\s\S]*?<\/footer>/gi, "")
+    .replace(/<aside\b[\s\S]*?<\/aside>/gi, "");
 
-  let mainScope = html;
-  const mainMatch = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
+  const mainMatch = mainScope.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
   if (mainMatch) {
     mainScope = mainMatch[1];
   } else {
-    const primaryMatch = html.match(
-      /<div[^>]+id=["']?primary["']?[^>]*>([\s\S]*?)<\/div>\s*<(?:aside|div)[^>]+id=["']?(?:sidebar|secondary)/i
+    const cutIdx = mainScope.search(
+      /<(?:aside|div|footer)[^>]+(?:id|class)=["']?[^"'>]*(?:sidebar|secondary|widget-area|site-footer|footer-widgets)/i
     );
-    if (primaryMatch) {
-      mainScope = primaryMatch[1];
-    } else {
-      const cutIdx = html.search(
-        /<(?:aside|div|footer)[^>]+(?:id|class)=["']?[^"'>]*(?:sidebar|secondary|widget-area|site-footer|footer-widgets)/i
-      );
-      if (cutIdx > 1500) {
-        mainScope = html.slice(0, cutIdx);
-      }
+    if (cutIdx > 1500) {
+      mainScope = mainScope.slice(0, cutIdx);
     }
   }
 
+  // CÁCH 1: Tách theo <article> hoặc các khối div bài viết chuẩn
   const articleBlocks = mainScope.match(/<article[\s\S]*?<\/article>/gi) || [];
-  const blocks =
+  const divBlocks =
     articleBlocks.length > 0
       ? articleBlocks
       : mainScope.split(
-          /(?=<div[^>]+class=["']?[^"'>]*(?:post-|loop-video|video-item|clip-item|entry-item|item-video|col-video|type-bai-viet|video-block|member-video)[^"'>]*["']?)/i
+          /(?=<div[^>]+class=["']?[^"'>]*(?:post-|loop-video|video-item|clip-item|entry-item|item-video|col-video|type-bai-viet|video-block|member-video|col-md-|col-sm-|col-6|item\b)[^"'>]*["']?)/i
         );
 
-  for (const block of blocks) {
+  const tryExtractFromBlock = (block) => {
     const realThumb = extractThumbnailFromBlock(block, baseDomain);
-    if (!realThumb) continue;
+    if (!realThumb) return;
 
     const aTagRegex =
       /<a\b[^>]*href\s*=\s*(?:["']([^"']+)["']|([^\s>"']+))[^>]*>([\s\S]*?)<\/a>/gi;
@@ -1951,26 +1969,15 @@ function parseVideoListHtml(
       }
     }
 
-    if (!chosenUrl) continue;
+    if (!chosenUrl) return;
 
     const itemSlug = chosenUrl.pathname.replace(/^\/+|\/+$/g, "");
-    if (!itemSlug || seen.has(itemSlug)) continue;
-
-    // NGĂN CHẶN TRỘN LẪN 2 MỤC:
-    const isMemberPost = itemSlug.startsWith("bai-viet/");
-    if (isMemberCat && !isMemberPost) {
-      // Đang ở tab "Video thành viên" -> Bỏ qua mọi bài viết thường nằm ở widget phụ
-      continue;
-    }
-    if (!isMemberCat && category !== "all" && isMemberPost) {
-      // Đang ở tab "Phim Việt mới" (hoặc danh mục thường khác) -> Bỏ qua bài đăng thành viên ở widget phụ
-      continue;
-    }
+    if (!itemSlug || seen.has(itemSlug)) return;
 
     const titleFromA = chosenATag.match(/\btitle=["']([^"']+)["']/i);
     const titleMatch =
       titleFromA ||
-      block.match(/<h[1-4][^>]*>([\s\S]*?)<\/h[1-4]>/i) ||
+      block.match(/<h[1-5][^>]*>([\s\S]*?)<\/h[1-5]>/i) ||
       block.match(/\btitle=["']([^"']+)["']/i) ||
       block.match(/\balt=["']([^"']+)["']/i);
 
@@ -1978,8 +1985,12 @@ function parseVideoListHtml(
       titleMatch ? cleanText(titleMatch[1]) : chosenInnerText || itemSlug
     ).replace(/\s*[-|–]\s*Viet69.*$/i, "");
 
-    if (isSystemLinkOrTitle(itemSlug, resolvedTitle)) {
-      continue;
+    if (
+      !resolvedTitle ||
+      resolvedTitle.length < 3 ||
+      isSystemLinkOrTitle(itemSlug, resolvedTitle)
+    ) {
+      return;
     }
 
     seen.add(itemSlug);
@@ -2003,6 +2014,36 @@ function parseVideoListHtml(
       comments: stats.comments,
       likes: stats.likes
     });
+  };
+
+  for (const b of divBlocks) {
+    tryExtractFromBlock(b);
+  }
+
+  // CÁCH 2 (Universal Anchor-Image Scanner): Nếu trang Video thành viên dùng cấu trúc HTML riêng khiến Cách 1 lấy được < 4 bài, quét mọi thẻ <a> bọc <img>
+  if (allCandidates.length < 4) {
+    const anchorImgRegex =
+      /<a\b[^>]*href\s*=\s*(?:["']([^"']+)["']|([^\s>"']+))[^>]*>(?:(?!<\/a>)[\s\S])*?<img\b[^>]*>(?:(?!<\/a>)[\s\S])*?<\/a>/gi;
+    let aim;
+    while ((aim = anchorImgRegex.exec(mainScope)) !== null) {
+      const aBlock = aim[0];
+      const startPos = Math.max(0, aim.index - 200);
+      const endPos = Math.min(mainScope.length, aim.index + aBlock.length + 650);
+      const surroundingContext = mainScope.slice(startPos, endPos);
+      tryExtractFromBlock(surroundingContext);
+    }
+  }
+
+  // Nếu trang có chứa các bài thuộc /bai-viet/ và đang ở tab Video thành viên, ưu tiên giữ nhóm /bai-viet/ nếu số lượng >= 4
+  const isMemberCat =
+    category === "video-cua-thanh-vien" || category === "bai-viet";
+  if (isMemberCat) {
+    const memberPosts = allCandidates.filter((x) =>
+      x.slug.startsWith("bai-viet/")
+    );
+    if (memberPosts.length >= 4) {
+      return memberPosts;
+    }
   }
 
   return allCandidates;
@@ -2987,7 +3028,8 @@ export async function GET(req) {
         }
       }
     } else {
-      if (navPathCache.size === 0) {
+      // Nếu chưa học được đường dẫn thật của mục đang chọn từ thanh menu, quét nhanh trang chủ trước
+      if (!navPathCache.has(bareSlug) && !navPathCache.has(cleanCat)) {
         try {
           const { html: homeHtml } = await fetchHtmlWithFallback(
             `${baseDomain}/`,
@@ -3023,19 +3065,19 @@ export async function GET(req) {
         }
       };
 
-      // 1. Ưu tiên đường dẫn chuẩn trong CATEGORY_MAP
+      // 1. Ưu tiên số 1: Đường dẫn thật lấy trực tiếp từ nút trên thanh menu của Viet69
+      const cachedPath =
+        navPathCache.get(cleanCat) || navPathCache.get(bareSlug);
+      if (cachedPath) {
+        addCandidateWithPagination(cachedPath);
+      }
+
+      // 2. Đường dẫn trong CATEGORY_MAP
       const mapped = CATEGORY_MAP[bareSlug];
       if (mapped && Array.isArray(mapped.paths)) {
         for (const p of mapped.paths) {
           addCandidateWithPagination(p);
         }
-      }
-
-      // 2. Đường dẫn đã học từ thanh menu (đã kiểm tra chéo chống nhầm lẫn)
-      const cachedPath =
-        navPathCache.get(cleanCat) || navPathCache.get(bareSlug);
-      if (cachedPath) {
-        addCandidateWithPagination(cachedPath);
       }
 
       // 3. Các cấu trúc chuẩn của WordPress
@@ -3054,7 +3096,7 @@ export async function GET(req) {
           const { html } = await fetchHtmlWithFallback(
             u,
             reqHeaders,
-            false,
+            true,
             true
           );
           if (!html) return null;
@@ -3069,7 +3111,8 @@ export async function GET(req) {
             baseHost,
             cleanCat
           );
-          if (rawItems.length < 2) return null;
+          // Bắt buộc trang danh mục hợp lệ phải có từ 3 video thật trở lên
+          if (rawItems.length < 3) return null;
           return {
             items: sortVideoItems(rawItems, sortBy),
             totalPages: extractTotalPagesFromHtml(html, page, isMemberCat),
@@ -3078,7 +3121,6 @@ export async function GET(req) {
         })
       );
 
-      // Giữ nguyên thứ tự ưu tiên của đường dẫn chuẩn (KHÔNG sort theo độ dài để tránh việc trang thường đè trang thành viên)
       const validArchive = parallelResults.find((r) => r !== null);
       if (validArchive) {
         return NextResponse.json(
@@ -3093,7 +3135,7 @@ export async function GET(req) {
         );
       }
 
-      // Dự phòng tìm kiếm nếu không có trang archive
+      // Dự phòng tìm kiếm từ khóa nếu danh mục không có trang riêng
       const fallbackKeyword =
         mapped?.keyword || bareSlug.replace(/-/g, " ");
       const searchFallbackUrl = appendSort(
@@ -3109,7 +3151,7 @@ export async function GET(req) {
       if (searchHtml) {
         const sNav = extractNavCategories(searchHtml, baseDomain, baseHost);
         const sItems = sortVideoItems(
-          parseVideoListHtml(searchHtml, baseDomain, baseHost, appendCat(cleanCat)),
+          parseVideoListHtml(searchHtml, baseDomain, baseHost, "all"),
           sortBy
         );
         if (sItems.length > 0) {
@@ -3144,8 +3186,4 @@ export async function GET(req) {
     { items, page, totalPages, total: filtered.length, categories: [] },
     { headers: CORS }
   );
-}
-
-function appendCat(c) {
-  return c === "video-cua-thanh-vien" ? "all" : c;
 }
