@@ -42,7 +42,7 @@ const SORT_OPTIONS = [
 ];
 
 const STATE_STORAGE_KEY = "videosite_browse_state_v1";
-const CACHE_STORAGE_KEY = "videosite_list_cache_v5";
+const CACHE_STORAGE_KEY = "videosite_list_cache_v6";
 const SCROLL_STORAGE_KEY = "videosite_scroll_y_v1";
 
 function buildPagination(currentPage, totalPages) {
@@ -123,6 +123,62 @@ function getInitialBrowseState() {
   return { category: "all", page: 1, sortBy: "latest", q: "" };
 }
 
+// Hàm dự phòng gọi trực tiếp API qmhv3.top từ trình duyệt người dùng nếu IP Vercel bị chặn
+async function fetchQmhClientSideFallback(page = 1, q = "") {
+  const endpoints = [
+    `https://qmhv3.top/api/videos?category=movie&page=${page}${q ? `&q=${encodeURIComponent(q)}` : ""}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(`https://qmhv3.top/api/videos?category=movie&page=${page}`)}`
+  ];
+
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) continue;
+      const json = await res.json();
+      const rawList = Array.isArray(json?.items)
+        ? json.items
+        : Array.isArray(json?.data)
+        ? json.data
+        : [];
+      if (rawList.length > 0) {
+        const mapped = rawList.map((item) => {
+          const rawSlug = String(item.slug || item.id || "").replace(
+            /^\/+|\/+$/g,
+            ""
+          );
+          const fullSlug = rawSlug.startsWith("qmh__")
+            ? rawSlug
+            : `qmh__${rawSlug}`;
+          let thumb =
+            item.thumbnail ||
+            item.thumb ||
+            item.poster ||
+            item.image ||
+            "https://placehold.co/600x340/1e293b/94a3b8?text=QMH";
+          if (thumb.startsWith("/") && !thumb.startsWith("//")) {
+            thumb = `https://qmhv3.top${thumb}`;
+          }
+          return {
+            ...item,
+            id: fullSlug,
+            slug: fullSlug,
+            category: "qmh-movie",
+            thumbnail: thumb,
+            thumb,
+            poster: thumb,
+            image: thumb
+          };
+        });
+        return {
+          items: mapped,
+          totalPages: Math.max(1, Number(json?.totalPages) || page + 5)
+        };
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
 export default function HomePage() {
   const [ready, setReady] = useState(false);
   const [category, setCategory] = useState("all");
@@ -134,6 +190,7 @@ export default function HomePage() {
   const [items, setItems] = useState([]);
   const [totalPages, setTotalPages] = useState(1);
   const [dynamicCats, setDynamicCats] = useState([]);
+  const [listDebug, setListDebug] = useState(null);
   const [sortOpen, setSortOpen] = useState(false);
   const [showMoreTags, setShowMoreTags] = useState(false);
   const [jumpPageInput, setJumpPageInput] = useState("");
@@ -251,6 +308,7 @@ export default function HomePage() {
       } catch (_) {}
 
       setLoading(true);
+      setListDebug(null);
       if (shouldScrollTopRef.current) {
         shouldScrollTopRef.current = false;
         window.scrollTo({ top: 0, behavior: "smooth" });
@@ -272,11 +330,24 @@ export default function HomePage() {
 
         if (!isMounted) return;
 
-        const loadedItems = Array.isArray(data?.items) ? data.items : [];
-        const loadedTotalPages = Math.max(1, Number(data?.totalPages) || 1);
+        let loadedItems = Array.isArray(data?.items) ? data.items : [];
+        let loadedTotalPages = Math.max(1, Number(data?.totalPages) || 1);
         const loadedCats = Array.isArray(data?.categories)
           ? data.categories
           : [];
+
+        if (data?._debug) {
+          setListDebug(data._debug);
+        }
+
+        // Nếu đang ở tab Phim QMH mà server Vercel bị chặn trả về rỗng, thử gọi trực tiếp từ trình duyệt
+        if (category === "qmh-movie" && loadedItems.length === 0) {
+          const clientFallback = await fetchQmhClientSideFallback(page, q);
+          if (clientFallback && clientFallback.items.length > 0) {
+            loadedItems = clientFallback.items;
+            loadedTotalPages = clientFallback.totalPages;
+          }
+        }
 
         setItems(loadedItems);
         setTotalPages(loadedTotalPages);
@@ -617,6 +688,11 @@ export default function HomePage() {
             >
               Về trang tất cả
             </button>
+            {listDebug && (
+              <pre className="mt-4 max-h-48 overflow-auto rounded-lg bg-black/50 p-3 text-left font-mono text-[11px] text-slate-400 whitespace-pre-wrap">
+                {JSON.stringify(listDebug, null, 2)}
+              </pre>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 sm:gap-5 md:grid-cols-3 lg:grid-cols-4">
