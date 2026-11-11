@@ -4,7 +4,6 @@ import Link from "next/link";
 
 function encodeSafeWatchSlug(rawSlug = "") {
   const clean = String(rawSlug || "").replace(/^\/+|\/+$/g, "");
-  // Mã hóa dấu "/" thành "__slash__" để route [slug] đơn của Next.js luôn nhận đủ 100%
   return encodeURIComponent(clean.replace(/\//g, "__slash__"));
 }
 
@@ -23,13 +22,15 @@ export default function VideoCard({ video, item }) {
   const comments = v.comments ?? "0";
   const likes = v.likes ?? "0";
 
+  const isQmh = slug.startsWith("qmh__") || v.category === "qmh-movie";
+  const isMember = slug.startsWith("bai-viet/");
+
   return (
     <Link
       href={`/watch/${encodeSafeWatchSlug(slug)}`}
-      className="group flex flex-col overflow-hidden rounded-2xl bg-surface border border-border transition-all duration-300 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg hover:shadow-primary/20"
+      className="group flex flex-col overflow-hidden rounded-2xl bg-slate-800/45 border border-slate-800/90 hover:border-indigo-500/40 hover:bg-slate-800/75 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-indigo-950/30"
     >
-      {/* KHUNG ẢNH THUMBNAIL */}
-      <div className="relative aspect-video w-full overflow-hidden bg-sub">
+      <div className="relative aspect-video w-full overflow-hidden bg-slate-900">
         <img
           src={thumb}
           alt={title}
@@ -41,17 +42,15 @@ export default function VideoCard({ video, item }) {
           className="h-full w-full object-cover object-center transition-transform duration-500 ease-out group-hover:scale-105"
         />
 
-        {/* Gradient mờ đè lên ảnh (Giữ nguyên màu đen để chữ/icon màu trắng luôn nổi bật trên mọi nền) */}
-        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-60 transition-opacity group-hover:opacity-80" />
+        <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-transparent to-transparent opacity-60 group-hover:opacity-80 transition-opacity" />
 
-        {/* Nút Play (Primary Color) */}
-        <div className="absolute inset-0 flex items-center justify-center opacity-0 transition-all duration-300 group-hover:opacity-100">
-          <div className="flex h-11 w-11 transform scale-90 items-center justify-center rounded-full bg-primary/90 text-primary-foreground shadow-md backdrop-blur-sm transition-transform group-hover:scale-100">
+        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300">
+          <div className="flex h-11 w-11 items-center justify-center rounded-full bg-indigo-500/90 text-white backdrop-blur-sm shadow-md transform scale-90 group-hover:scale-100 transition-transform">
             <svg
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 24 24"
               fill="currentColor"
-              className="h-5 w-5 ml-0.5"
+              className="w-5 h-5 ml-0.5"
             >
               <path
                 fillRule="evenodd"
@@ -62,38 +61,40 @@ export default function VideoCard({ video, item }) {
           </div>
         </div>
 
-        {/* Badge Thành viên (Success Color) */}
-        {slug.startsWith("bai-viet/") && (
-          <span className="absolute left-2 top-2 rounded-md bg-success/90 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow">
+        {isQmh && (
+          <span className="absolute top-2 left-2 rounded-md bg-indigo-600/95 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white shadow">
+            QMH
+          </span>
+        )}
+
+        {!isQmh && isMember && (
+          <span className="absolute top-2 left-2 rounded-md bg-emerald-500/90 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow">
             Thành viên
           </span>
         )}
 
-        {/* Badge Thời lượng */}
         {v.duration && (
-          <span className="absolute bottom-2 right-2 rounded-md bg-black/75 px-1.5 py-0.5 text-[11px] font-medium text-white backdrop-blur-sm shadow-sm">
+          <span className="absolute bottom-2 right-2 rounded-md bg-slate-950/80 backdrop-blur-xs px-1.5 py-0.5 text-[11px] font-medium text-slate-200">
             {v.duration}
           </span>
         )}
       </div>
 
-      {/* KHUNG NỘI DUNG THÔNG TIN */}
-      <div className="flex flex-1 flex-col justify-between bg-surface p-3.5">
+      <div className="flex flex-1 flex-col justify-between p-3.5">
         <h3
           title={title}
-          className="line-clamp-2 text-[13.5px] font-medium leading-relaxed text-textMain transition-colors group-hover:text-primary"
+          className="line-clamp-2 text-[13.5px] font-medium leading-relaxed text-slate-200 group-hover:text-indigo-300 transition-colors"
         >
           {title}
         </h3>
 
-        {/* Khối thống kê */}
-        <div className="mt-3 flex items-center gap-4 border-t border-border pt-2.5 text-[11.5px] text-textSub">
+        <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex items-center gap-4 text-[11.5px] text-slate-400">
           <span className="inline-flex items-center gap-1.5" title="Lượt xem">
             <svg
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 20 20"
               fill="currentColor"
-              className="h-3.5 w-3.5 opacity-75"
+              className="w-3.5 h-3.5 text-slate-500"
             >
               <path d="M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" />
               <path
@@ -110,7 +111,7 @@ export default function VideoCard({ video, item }) {
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 20 20"
               fill="currentColor"
-              className="h-3.5 w-3.5 opacity-75"
+              className="w-3.5 h-3.5 text-slate-500"
             >
               <path
                 fillRule="evenodd"
@@ -126,7 +127,7 @@ export default function VideoCard({ video, item }) {
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 20 20"
               fill="currentColor"
-              className="h-3.5 w-3.5 opacity-75"
+              className="w-3.5 h-3.5 text-slate-500"
             >
               <path d="M1 8.25a1.25 1.25 0 112.5 0v7.5a1.25 1.25 0 11-2.5 0v-7.5zM11 3V1.7c0-.268.14-.526.395-.607A2 2 0 0114 3c0 .995-.182 1.948-.514 2.826-.204.54.166 1.174.744 1.174h2.52c1.243 0 2.261 1.01 2.146 2.247a23.864 23.864 0 01-1.341 5.974C17.153 16.323 16.072 17 14.9 17h-3.192a3 3 0 01-1.341-.317l-2.734-1.366A3 3 0 006.292 15H5V8h.963c.685 0 1.258-.483 1.612-1.068a4.011 4.011 0 012.166-1.73c.432-.143.853-.386 1.011-.814.16-.432.248-.9.248-1.388z" />
             </svg>
