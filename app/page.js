@@ -6,6 +6,7 @@ import { getSource } from "@/config/site";
 
 const MAIN_CATEGORIES = [
   { name: "Tất cả", slug: "all" },
+  { name: "Phim QMH", slug: "qmh-movie", badge: "Hot" },
   { name: "Phim Việt mới", slug: "phim-sex-viet-moi" },
   {
     name: "Video thành viên",
@@ -41,10 +42,9 @@ const SORT_OPTIONS = [
 ];
 
 const STATE_STORAGE_KEY = "videosite_browse_state_v1";
-const CACHE_STORAGE_KEY = "videosite_list_cache_v4";
+const CACHE_STORAGE_KEY = "videosite_list_cache_v5";
 const SCROLL_STORAGE_KEY = "videosite_scroll_y_v1";
 
-// Giới hạn thanh phân trang tối đa 5-7 nút gọn gàng, không bao giờ xổ tràn hàng
 function buildPagination(currentPage, totalPages) {
   if (totalPages <= 1) return [1];
 
@@ -595,7 +595,7 @@ export default function HomePage() {
             {Array.from({ length: 12 }).map((_, i) => (
               <div
                 key={i}
-                className=" animate-pulse overflow-hidden rounded-2xl border border-border bg-surface"
+                className="animate-pulse overflow-hidden rounded-2xl border border-border bg-surface"
               >
                 <div className="aspect-video w-full bg-sub" />
                 <div className="space-y-2 p-2.5 sm:p-3.5">
