@@ -24,10 +24,14 @@ function decodeSlugParam(raw = "") {
     .replace(/^\/+|\/+$/g, "");
 }
 
-function getBackListUrl(isMemberPost = false) {
-  if (typeof window === "undefined") {
-    return isMemberPost ? "/?category=video-cua-thanh-vien" : "/";
-  }
+function getBackListUrl(isMemberPost = false, isQmhPost = false) {
+  const defaultFallback = isQmhPost
+    ? "/?category=qmh-movie"
+    : isMemberPost
+    ? "/?category=video-cua-thanh-vien"
+    : "/";
+
+  if (typeof window === "undefined") return defaultFallback;
   try {
     const raw = sessionStorage.getItem(STATE_STORAGE_KEY);
     if (raw) {
@@ -41,7 +45,7 @@ function getBackListUrl(isMemberPost = false) {
       return qs ? `/?${qs}` : "/";
     }
   } catch (_) {}
-  return isMemberPost ? "/?category=video-cua-thanh-vien" : "/";
+  return defaultFallback;
 }
 
 export default function WatchPage() {
@@ -51,6 +55,8 @@ export default function WatchPage() {
     ? params.slug.join("/")
     : params?.slug || "";
   const cleanSlug = decodeSlugParam(rawParam);
+
+  const isQmhVideo = cleanSlug.startsWith("qmh__");
   const isMemberVideo = cleanSlug.startsWith("bai-viet/");
 
   const [video, setVideo] = useState(null);
@@ -69,8 +75,11 @@ export default function WatchPage() {
       try {
         const savedSource = typeof getSource === "function" ? getSource() : "";
 
-        // Phân tách tuyệt đối danh sách đề xuất giữa bài Thành viên và bài của Web
-        let currentCat = isMemberVideo ? "video-cua-thanh-vien" : "all";
+        let currentCat = isQmhVideo
+          ? "qmh-movie"
+          : isMemberVideo
+          ? "video-cua-thanh-vien"
+          : "all";
         let currentPage = "1";
 
         try {
@@ -78,20 +87,29 @@ export default function WatchPage() {
             sessionStorage.getItem(STATE_STORAGE_KEY) || "{}"
           );
           const savedCat = savedState.category || "all";
-          const isSavedMemberCat =
-            savedCat === "video-cua-thanh-vien" || savedCat === "bai-viet";
 
-          if (isMemberVideo) {
-            currentCat = "video-cua-thanh-vien";
-            if (isSavedMemberCat && savedState.page) {
+          if (isQmhVideo) {
+            currentCat = "qmh-movie";
+            if (savedCat === "qmh-movie" && savedState.page) {
               currentPage = String(savedState.page);
             }
-          } else {
-            if (!isSavedMemberCat) {
-              currentCat = savedCat;
-              if (savedState.page) {
-                currentPage = String(savedState.page);
-              }
+          } else if (isMemberVideo) {
+            currentCat = "video-cua-thanh-vien";
+            if (
+              (savedCat === "video-cua-thanh-vien" ||
+                savedCat === "bai-viet") &&
+              savedState.page
+            ) {
+              currentPage = String(savedState.page);
+            }
+          } else if (
+            savedCat !== "qmh-movie" &&
+            savedCat !== "video-cua-thanh-vien" &&
+            savedCat !== "bai-viet"
+          ) {
+            currentCat = savedCat;
+            if (savedState.page) {
+              currentPage = String(savedState.page);
             }
           }
         } catch (_) {}
@@ -119,12 +137,7 @@ export default function WatchPage() {
         if (Array.isArray(listData?.items)) {
           setRelated(
             listData.items
-              .filter((x) => {
-                const itemSlug = decodeSlugParam(x.slug);
-                if (itemSlug === cleanSlug) return false;
-                const itemIsMember = itemSlug.startsWith("bai-viet/");
-                return isMemberVideo ? itemIsMember : !itemIsMember;
-              })
+              .filter((x) => decodeSlugParam(x.slug) !== cleanSlug)
               .slice(0, 8)
           );
         }
@@ -139,22 +152,22 @@ export default function WatchPage() {
     return () => {
       isMounted = false;
     };
-  }, [cleanSlug, isMemberVideo]);
+  }, [cleanSlug, isQmhVideo, isMemberVideo]);
 
   const handleBackToList = () => {
-    const targetUrl = getBackListUrl(isMemberVideo);
+    const targetUrl = getBackListUrl(isMemberVideo, isQmhVideo);
     router.push(targetUrl);
   };
 
   const tags = Array.isArray(video?.tags) ? video.tags : [];
 
   return (
-    <div className="mx-auto max-w-5xl space-y-8 px-3 py-4 text-textMain sm:px-6 sm:py-6">
+    <div className="max-w-5xl mx-auto px-3 sm:px-6 py-4 sm:py-6 text-slate-100 space-y-8">
       <div>
         <button
           type="button"
           onClick={handleBackToList}
-          className="mb-3.5 inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3.5 py-1.5 text-xs font-medium text-textSub shadow-sm transition hover:border-primary/40 hover:bg-sub hover:text-textMain"
+          className="inline-flex items-center gap-1.5 rounded-full bg-slate-800/70 hover:bg-slate-800 border border-slate-700/60 px-3.5 py-1.5 text-xs font-medium text-slate-300 hover:text-white mb-3.5 transition"
         >
           <span>←</span>
           <span>Quay lại danh sách</span>
@@ -162,37 +175,40 @@ export default function WatchPage() {
 
         {loading ? (
           <div className="space-y-4">
-            <div className="flex aspect-video w-full animate-pulse items-center justify-center rounded-xl border border-border bg-sub text-sm text-textSub sm:rounded-2xl">
+            <div className="aspect-video w-full bg-slate-800/60 animate-pulse rounded-xl sm:rounded-2xl flex items-center justify-center text-sm text-slate-400">
               Đang tải luồng phát...
             </div>
-            <div className="h-6 w-3/4 animate-pulse rounded-lg bg-sub" />
+            <div className="h-6 bg-slate-800/60 rounded-lg w-3/4 animate-pulse" />
           </div>
         ) : (
           <div className="space-y-4">
             <Player video={video} />
 
-            <div className="space-y-3 rounded-2xl border border-border bg-surface p-4 shadow-sm sm:p-5">
+            <div className="pt-1 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
+                {isQmhVideo && (
+                  <span className="rounded-md bg-indigo-500/20 border border-indigo-500/30 px-2 py-0.5 text-xs font-semibold text-indigo-300">
+                    Phim QMH
+                  </span>
+                )}
                 {isMemberVideo && (
-                  <span className="rounded-md border border-success/30 bg-primary-light px-2 py-0.5 text-xs font-semibold text-success">
+                  <span className="rounded-md bg-emerald-500/20 border border-emerald-500/30 px-2 py-0.5 text-xs font-semibold text-emerald-300">
                     Video thành viên
                   </span>
                 )}
-                <h1 className="text-base font-semibold leading-snug text-textMain sm:text-xl md:text-2xl">
-                  {video?.title || cleanSlug}
+                <h1 className="text-base sm:text-xl md:text-2xl font-semibold leading-snug text-slate-100">
+                  {video?.title || cleanSlug.replace(/^qmh__/, "")}
                 </h1>
               </div>
 
               {tags.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5 border-t border-border pt-3">
-                  <span className="mr-1 text-xs font-medium text-textSub">
-                    Thẻ:
-                  </span>
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  <span className="text-xs text-slate-400 mr-1">Thẻ:</span>
                   {tags.map((t) => (
                     <Link
                       key={t.slug}
                       href={`/?category=${encodeURIComponent(t.slug)}&page=1`}
-                      className="rounded-full border border-border bg-sub px-2.5 py-1 text-xs text-textSub transition hover:border-primary hover:bg-primary hover:text-primary-foreground"
+                      className="px-2.5 py-1 rounded-full bg-slate-800/70 hover:bg-indigo-500 border border-slate-700/50 text-xs text-slate-300 hover:text-white transition"
                     >
                       #{t.name}
                     </Link>
@@ -205,17 +221,19 @@ export default function WatchPage() {
       </div>
 
       {related.length > 0 && (
-        <div className="space-y-4 border-t border-border pt-6">
+        <div className="pt-6 border-t border-slate-800/80 space-y-4">
           <div className="flex items-center gap-2">
-            <span className="inline-block h-5 w-1.5 rounded-full bg-primary" />
-            <h2 className="text-base font-semibold text-textMain sm:text-lg">
-              {isMemberVideo
+            <span className="inline-block w-1.5 h-5 rounded-full bg-indigo-400" />
+            <h2 className="text-base sm:text-lg font-semibold text-slate-100">
+              {isQmhVideo
+                ? "Phim QMH đề xuất"
+                : isMemberVideo
                 ? "Video thành viên khác"
                 : "Video cùng trang đề xuất"}
             </h2>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 sm:gap-5 md:grid-cols-3 lg:grid-cols-4">
+          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
             {related.map((item, idx) => (
               <VideoCard key={item.slug || idx} video={item} />
             ))}
