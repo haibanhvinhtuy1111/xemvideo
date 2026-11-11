@@ -281,7 +281,7 @@ function isSystemLinkOrTitle(slug = "", title = "") {
   return false;
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 7000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -296,7 +296,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
 }
 
 function is404Html(html = "") {
-  if (!html || html.length < 350) return true;
+  if (!html || html.length < 300) return true;
   if (/<title>[^<]*(?:404|Not Found|Page not found)/i.test(html)) return true;
   if (html.includes("404 Not Found") && !html.includes("loop-video")) {
     return true;
@@ -349,7 +349,7 @@ async function fetchHtmlWithFallback(
   let status = 0;
   let cookies = "";
   try {
-    const res = await fetchWithTimeout(targetUrl, { headers }, 5500);
+    const res = await fetchWithTimeout(targetUrl, { headers }, 6500);
     status = res.status;
     const setCookie = res.headers.get("set-cookie");
     if (setCookie) {
@@ -391,7 +391,7 @@ async function fetchHtmlWithFallback(
 
   for (const buildProxy of proxies) {
     try {
-      const res = await fetchWithTimeout(buildProxy(targetUrl), {}, 6000);
+      const res = await fetchWithTimeout(buildProxy(targetUrl), {}, 7500);
       if (res.ok) {
         const text = await res.text();
         if (!is404Html(text) && !text.includes("Just a moment...")) {
@@ -413,6 +413,38 @@ async function fetchHtmlWithFallback(
   }
 
   return { html: "", via: "failed", status, cookies: "" };
+}
+
+// Hàm tải JSON/Text có tích hợp sẵn Proxy vượt Cloudflare (chuyên dùng cho API của qmhv3.top)
+async function fetchJsonOrTextWithProxy(targetUrl, headers, timeoutMs = 8500) {
+  try {
+    const res = await fetchWithTimeout(targetUrl, { headers }, timeoutMs);
+    if (res.ok) {
+      const text = await res.text();
+      if (text && !text.includes("Just a moment...")) {
+        return { text, via: "direct", status: res.status };
+      }
+    }
+  } catch (_) {}
+
+  const proxies = [
+    (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
+  ];
+
+  for (const buildProxy of proxies) {
+    try {
+      const res = await fetchWithTimeout(buildProxy(targetUrl), {}, timeoutMs);
+      if (res.ok) {
+        const text = await res.text();
+        if (text && !text.includes("Just a moment...")) {
+          return { text, via: "proxy", status: res.status };
+        }
+      }
+    } catch (_) {}
+  }
+
+  return { text: "", via: "failed", status: 0 };
 }
 
 function decodeBase64Safe(str = "") {
@@ -1700,7 +1732,6 @@ function extractThumbnailFromBlock(block = "", baseDomain = "") {
     );
   };
 
-  // Kiểm tra ảnh Next.js /_next/image?url=...
   const nextImgMatch = block.match(/\/_next\/image\?[^"'\s>]*url=([^"'\s&>]+)/i);
   if (nextImgMatch && nextImgMatch[1]) {
     try {
@@ -1822,7 +1853,6 @@ function parseVideoListHtml(
     }
   }
 
-  // Kết hợp cả <article> lẫn các khối <div class="post-|video-item..."> để không bỏ sót bài của thành viên
   const articleBlocks = mainScope.match(/<article[\s\S]*?<\/article>/gi) || [];
   const splitDivBlocks = mainScope.split(
     /(?=<div[^>]+class=["']?[^"'>]*(?:post-|loop-video|video-item|clip-item|entry-item|item-video|col-video|type-bai-viet|video-block|member-video|col-md-|col-sm-|col-6|item\b)[^"'>]*["']?)/i
@@ -1889,7 +1919,6 @@ function parseVideoListHtml(
     const isBvSlug =
       itemSlug.startsWith("bai-viet/") || /\btype-bai-viet\b/i.test(block);
 
-    // Ở các tab của Web (như Tất cả, Phim Việt mới), chặn các bài `bai-viet/` của thành viên
     if (!isMemberCat && isBvSlug) {
       return;
     }
@@ -1966,7 +1995,6 @@ function parseVideoListHtml(
     }
   }
 
-  // Nếu đang ở mục Video thành viên và trang có các bài mang đường dẫn gốc `bai-viet/`, ưu tiên trả về nhóm đó
   if (isMemberCat) {
     const strictBv = allCandidates.filter((x) => x.isOriginalBv);
     if (strictBv.length > 0) {
@@ -1993,19 +2021,132 @@ function sortVideoItems(items = [], sortBy = "latest") {
 }
 
 // =====================================================================
-// BỘ TÍCH HỢP NGUỒN MỚI: QMHV3.TOP (DANH SÁCH & XEM VIDEO `/watch/...`)
+// BỘ BÓC TÁCH CHUYÊN SÂU CHO NGUỒN QMHV3.TOP (API JSON + JS CHUNK + HTML)
 // =====================================================================
+
+// Chuẩn hóa mọi cấu trúc JSON danh sách trả về từ qmhv3.top
+function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
+  if (!rawJson) return null;
+  let obj = rawJson;
+  if (typeof rawJson === "string") {
+    try {
+      obj = JSON.parse(rawJson);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  const rawList = Array.isArray(obj)
+    ? obj
+    : Array.isArray(obj?.items)
+    ? obj.items
+    : Array.isArray(obj?.data)
+    ? obj.data
+    : Array.isArray(obj?.videos)
+    ? obj.videos
+    : Array.isArray(obj?.movies)
+    ? obj.movies
+    : Array.isArray(obj?.results)
+    ? obj.results
+    : Array.isArray(obj?.list)
+    ? obj.list
+    : Array.isArray(obj?.posts)
+    ? obj.posts
+    : [];
+
+  if (rawList.length === 0) return null;
+
+  const items = [];
+  for (const item of rawList) {
+    if (!item || typeof item !== "object") continue;
+    let rawSlug = String(
+      item.slug ||
+        item.id ||
+        item._id ||
+        item.vod_id ||
+        item.code ||
+        item.link ||
+        item.url ||
+        ""
+    ).trim();
+
+    if (!rawSlug) continue;
+    rawSlug = rawSlug
+      .replace(/^https?:\/\/[^/]+/i, "")
+      .replace(/^\/?watch\//i, "")
+      .replace(/^\/+|\/+$/g, "");
+    if (!rawSlug) continue;
+
+    const fullSlug = rawSlug.startsWith("qmh__")
+      ? rawSlug
+      : `qmh__${rawSlug}`;
+
+    let thumb = String(
+      item.thumbnail ||
+        item.thumb ||
+        item.poster ||
+        item.image ||
+        item.cover ||
+        item.pic ||
+        item.vod_pic ||
+        ""
+    ).trim();
+
+    if (thumb.startsWith("//")) thumb = `https:${thumb}`;
+    else if (thumb.startsWith("/")) thumb = `${baseDomain}${thumb}`;
+    if (!thumb.startsWith("http")) thumb = FALLBACK_THUMB;
+
+    const title = cleanText(
+      String(
+        item.title ||
+          item.name ||
+          item.vod_name ||
+          rawSlug.replace(/-/g, " ")
+      )
+    );
+
+    items.push({
+      ...item,
+      id: fullSlug,
+      slug: fullSlug,
+      title: title || rawSlug,
+      category: "qmh-movie",
+      thumbnail: thumb,
+      thumb,
+      poster: thumb,
+      image: thumb,
+      views: String(item.views ?? item.view ?? "0"),
+      comments: String(item.comments ?? item.comment ?? "0"),
+      likes: String(item.likes ?? item.like ?? "0")
+    });
+  }
+
+  if (items.length === 0) return null;
+
+  const totalPages = Math.max(
+    1,
+    Number(
+      obj?.totalPages ||
+        obj?.total_pages ||
+        obj?.pageCount ||
+        obj?.last_page ||
+        10
+    )
+  );
+
+  return { items, totalPages };
+}
+
 function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
   const items = [];
   const seen = new Set();
   if (!html) return items;
 
-  // Unescape dữ liệu Next.js RSC Flight (`self.__next_f.push`) nếu có
   const unescaped = html
     .replace(/\\"/g, '"')
     .replace(/\\\//g, "/");
 
-  // 1. Quét mọi thẻ <a href="/watch/<slug>"> trong HTML
+  // 1. Quét mọi thẻ <a href="/watch/<slug>">
   const watchLinkRegex =
     /<a\b[^>]*href=["']?(?:https?:\/\/[^"'\s>]*)?\/watch\/([^"'/?#\s>]+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
@@ -2059,21 +2200,69 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
     });
   }
 
-  // 2. Quét thêm các object JSON trong __NEXT_DATA__ hoặc RSC payload nếu web render qua JSON state
+  // 2. Quét mọi chuỗi "/watch/<slug>" xuất hiện trong RSC Flight payload hoặc script
   if (items.length < 4) {
-    const jsonSlugRegex =
-      /"slug"\s*:\s*"([^"]+)"[\s\S]{0,600}?"title"\s*:\s*"([^"]+)"/gi;
-    let jm;
-    while ((jm = jsonSlugRegex.exec(unescaped)) !== null) {
-      const rawSlug = jm[1].trim();
-      const rawTitle = cleanText(jm[2]);
-      if (!rawSlug || seen.has(rawSlug) || rawSlug.includes("/")) continue;
+    const anyWatchSlugRegex = /\/watch\/([a-zA-Z0-9_-]{5,120})/g;
+    let wm;
+    while ((wm = anyWatchSlugRegex.exec(unescaped)) !== null) {
+      const rawSlug = wm[1].trim();
+      if (!rawSlug || seen.has(rawSlug)) continue;
 
       const sliceAround = unescaped.slice(
-        Math.max(0, jm.index - 300),
-        Math.min(unescaped.length, jm.index + 800)
+        Math.max(0, wm.index - 400),
+        Math.min(unescaped.length, wm.index + 600)
+      );
+      const titleM = sliceAround.match(
+        /"(?:title|name)"\s*:\s*"([^"]{3,200})"/i
       );
       const thumbM = sliceAround.match(
+        /"(?:thumbnail|thumb|poster|image|cover)"\s*:\s*"([^"]+)"/i
+      );
+
+      let thumb = thumbM ? thumbM[1] : FALLBACK_THUMB;
+      if (thumb.startsWith("/") && !thumb.startsWith("//")) {
+        thumb = `${baseDomain}${thumb}`;
+      }
+      const title = titleM
+        ? cleanText(titleM[1])
+        : rawSlug.replace(/-/g, " ");
+
+      seen.add(rawSlug);
+      const fullSlug = rawSlug.startsWith("qmh__")
+        ? rawSlug
+        : `qmh__${rawSlug}`;
+
+      items.push({
+        id: fullSlug,
+        slug: fullSlug,
+        title,
+        category: "qmh-movie",
+        thumbnail: thumb,
+        thumb,
+        poster: thumb,
+        image: thumb,
+        duration: "",
+        views: "0",
+        comments: "0",
+        likes: "0"
+      });
+    }
+  }
+
+  // 3. Quét các object JSON có chứa cặp "slug" và "title" (bất kể thứ tự trước/sau)
+  if (items.length < 4) {
+    const objRegex = /\{[^{}]{15,1200}\}/g;
+    let om;
+    while ((om = objRegex.exec(unescaped)) !== null) {
+      const block = om[0];
+      const slugM = block.match(/"slug"\s*:\s*"([^"'\s/]{4,150})"/i);
+      const titleM = block.match(/"(?:title|name)"\s*:\s*"([^"]{3,200})"/i);
+      if (!slugM || !titleM) continue;
+
+      const rawSlug = slugM[1].trim();
+      if (seen.has(rawSlug)) continue;
+
+      const thumbM = block.match(
         /"(?:thumbnail|thumb|poster|image|cover)"\s*:\s*"([^"]+)"/i
       );
       let thumb = thumbM ? thumbM[1] : FALLBACK_THUMB;
@@ -2089,7 +2278,7 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
       items.push({
         id: fullSlug,
         slug: fullSlug,
-        title: rawTitle || rawSlug,
+        title: cleanText(titleM[1]) || rawSlug,
         category: "qmh-movie",
         thumbnail: thumb,
         thumb,
@@ -2111,100 +2300,132 @@ async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
     ...BROWSER_HEADERS,
     Referer: `${QMH_DOMAIN}/`
   };
+  const debugLog = [];
 
-  // 1. Thử gọi API JSON trực tiếp của qmhv3.top (nếu có `/api/videos`)
-  try {
-    const apiParams = new URLSearchParams({
-      category: "movie",
-      page: String(page),
-      sort: sortBy
-    });
-    if (q) apiParams.set("q", q);
+  // BƯỚC 1: Gọi các endpoint API JSON ứng viên của qmhv3.top (hỗ trợ cả Direct 8.5s + Proxy vượt Cloudflare)
+  const apiCandidates = [
+    `${QMH_DOMAIN}/api/videos?category=movie&page=${page}&sort=${sortBy}${q ? `&q=${encodeURIComponent(q)}` : ""}`,
+    `${QMH_DOMAIN}/api/videos?tab=casino&category=movie&page=${page}${q ? `&q=${encodeURIComponent(q)}` : ""}`,
+    `${QMH_DOMAIN}/api/videos?page=${page}${q ? `&q=${encodeURIComponent(q)}` : ""}`
+  ];
 
-    const apiRes = await fetchWithTimeout(
-      `${QMH_DOMAIN}/api/videos?${apiParams.toString()}`,
-      { headers: qmhHeaders },
-      5000
+  for (const apiUrl of apiCandidates) {
+    const { text, via, status } = await fetchJsonOrTextWithProxy(
+      apiUrl,
+      qmhHeaders,
+      8500
     );
-    if (
-      apiRes.ok &&
-      (apiRes.headers.get("content-type") || "").includes("json")
-    ) {
-      const json = await apiRes.json();
-      const rawList = Array.isArray(json?.items)
-        ? json.items
-        : Array.isArray(json?.data)
-        ? json.data
-        : [];
-      if (rawList.length > 0) {
-        const items = rawList.map((item) => {
-          const cleanItemSlug = String(item.slug || item.id || "").replace(
-            /^\/+|\/+$/g,
-            ""
-          );
-          const fullSlug = cleanItemSlug.startsWith("qmh__")
-            ? cleanItemSlug
-            : `qmh__${cleanItemSlug}`;
-          let thumb =
-            item.thumbnail ||
-            item.thumb ||
-            item.poster ||
-            item.image ||
-            FALLBACK_THUMB;
-          if (thumb.startsWith("/") && !thumb.startsWith("//")) {
-            thumb = `${QMH_DOMAIN}${thumb}`;
-          }
-          return {
-            ...item,
-            id: fullSlug,
-            slug: fullSlug,
-            category: "qmh-movie",
-            thumbnail: thumb,
-            thumb,
-            poster: thumb,
-            image: thumb
-          };
-        });
+    debugLog.push(`API(${apiUrl}) -> via:${via} status:${status} len:${text.length}`);
+    if (text) {
+      const normalized = normalizeQmhJsonItems(text, QMH_DOMAIN);
+      if (normalized && normalized.items.length > 0) {
         return {
-          items: sortVideoItems(items, sortBy),
+          items: sortVideoItems(normalized.items, sortBy),
           page,
-          totalPages: Math.max(1, Number(json?.totalPages) || page + 5),
-          total: Number(json?.total) || items.length * 10,
+          totalPages: normalized.totalPages,
+          total: normalized.totalPages * normalized.items.length,
           categories: []
         };
       }
     }
-  } catch (_) {}
+  }
 
-  // 2. Quét trực tiếp từ trang HTML `https://qmhv3.top/?tab=casino&category=movie&page=X`
-  const candidateUrls = q
-    ? [
-        `${QMH_DOMAIN}/?tab=casino&category=movie&q=${encodeURIComponent(q)}&page=${page}`,
-        `${QMH_DOMAIN}/?category=movie&q=${encodeURIComponent(q)}&page=${page}`
-      ]
-    : [
-        `${QMH_DOMAIN}/?tab=casino&category=movie&page=${page}`,
-        `${QMH_DOMAIN}/?tab=movie&category=movie&page=${page}`,
-        `${QMH_DOMAIN}/?category=movie&page=${page}`
-      ];
+  // BƯỚC 2: Tải HTML của trang `https://qmhv3.top/?tab=casino&category=movie&page=X`
+  const pageUrl = q
+    ? `${QMH_DOMAIN}/?tab=casino&category=movie&q=${encodeURIComponent(q)}&page=${page}`
+    : `${QMH_DOMAIN}/?tab=casino&category=movie&page=${page}`;
 
-  for (const url of candidateUrls) {
-    const { html } = await fetchHtmlWithFallback(url, qmhHeaders, true, false);
-    if (!html) continue;
-    const parsedItems = parseQmhListFromHtml(html, QMH_DOMAIN);
-    if (parsedItems.length > 0) {
+  const { html, via: htmlVia, status: htmlStatus } = await fetchHtmlWithFallback(
+    pageUrl,
+    qmhHeaders,
+    true,
+    false
+  );
+  debugLog.push(`HTML(${pageUrl}) -> via:${htmlVia} status:${htmlStatus} len:${html.length}`);
+
+  if (html) {
+    const parsedFromHtml = parseQmhListFromHtml(html, QMH_DOMAIN);
+    if (parsedFromHtml.length > 0) {
       const totalPages = extractTotalPagesFromHtml(html, page, false);
       return {
-        items: sortVideoItems(parsedItems, sortBy),
+        items: sortVideoItems(parsedFromHtml, sortBy),
         page,
         totalPages: Math.max(page, totalPages),
-        total: Math.max(page, totalPages) * parsedItems.length,
+        total: Math.max(page, totalPages) * parsedFromHtml.length,
         categories: []
       };
     }
+
+    // BƯỚC 3: Nếu trang là `"use client"` (chỉ có khung skeleton trong HTML), tự động tải file JS chunk `/_next/static/chunks/app/page-*.js` để lấy API hoặc danh sách video nhúng bên trong!
+    const chunkUrls = [];
+    const scriptRegex =
+      /<script[^>]+src=["']([^"']*(?:\/_next\/static\/chunks\/app\/page|\/assets\/index)[^"']*\.js[^"']*)["']/gi;
+    let sm;
+    while ((sm = scriptRegex.exec(html)) !== null) {
+      try {
+        chunkUrls.push(new URL(sm[1], QMH_DOMAIN).toString());
+      } catch (_) {}
+    }
+
+    for (const chunkUrl of chunkUrls.slice(0, 2)) {
+      const { text: jsCode } = await fetchJsonOrTextWithProxy(
+        chunkUrl,
+        qmhHeaders,
+        6500
+      );
+      if (!jsCode) continue;
+
+      // 3a. Kiểm tra xem trong JS chunk có nhúng sẵn danh sách video hay không
+      const embeddedItems = parseQmhListFromHtml(jsCode, QMH_DOMAIN);
+      if (embeddedItems.length > 0) {
+        return {
+          items: sortVideoItems(embeddedItems, sortBy),
+          page,
+          totalPages: Math.max(1, Math.ceil(embeddedItems.length / 20)),
+          total: embeddedItems.length,
+          categories: []
+        };
+      }
+
+      // 3b. Tìm các đường dẫn API nội bộ `/api/...` được gọi bên trong `page-*.js`
+      const discoveredApis = new Set();
+      const apiPathRegex = /["'`](\/api\/[a-zA-Z0-9_/-]+)["'`]/g;
+      let am;
+      while ((am = apiPathRegex.exec(jsCode)) !== null) {
+        if (!am[1].includes("videos")) {
+          discoveredApis.add(am[1]);
+        }
+      }
+
+      for (const apiPath of discoveredApis) {
+        const customApiUrl = `${QMH_DOMAIN}${apiPath}?category=movie&page=${page}`;
+        const { text: customResText } = await fetchJsonOrTextWithProxy(
+          customApiUrl,
+          qmhHeaders,
+          6500
+        );
+        const norm = normalizeQmhJsonItems(customResText, QMH_DOMAIN);
+        if (norm && norm.items.length > 0) {
+          return {
+            items: sortVideoItems(norm.items, sortBy),
+            page,
+            totalPages: norm.totalPages,
+            total: norm.totalPages * norm.items.length,
+            categories: []
+          };
+        }
+      }
+    }
   }
 
-  return { items: [], page, totalPages: 1, total: 0, categories: [] };
+  return {
+    items: [],
+    page,
+    totalPages: 1,
+    total: 0,
+    categories: [],
+    _debug: { qmhLogs: debugLog, htmlPreview: html ? html.slice(0, 400) : "" }
+  };
 }
 
 async function fetchQmhVideoDetail(cleanSlug = "") {
@@ -2223,7 +2444,6 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
   const tags = [];
   const debugInfo = { baseDomain: QMH_DOMAIN, htmlVia: "none" };
 
-  // Helper giải gói URL nếu nguồn dùng proxy tương đối `/api/videos?rawProxy=1&url=...`
   const unwrapQmhMediaUrl = (rawUrl = "") => {
     if (!rawUrl) return "";
     let u = String(rawUrl).trim();
@@ -2317,18 +2537,16 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
     }
   };
 
-  // 1. Thử lấy từ JSON API `/api/videos?slug=...` của qmhv3.top (nếu có)
+  // 1. Gọi `/api/videos?slug=...` của qmhv3.top (hỗ trợ cả Direct 8.5s + Proxy vượt Cloudflare)
   try {
-    const apiRes = await fetchWithTimeout(
+    const { text: apiText, via: apiVia } = await fetchJsonOrTextWithProxy(
       `${QMH_DOMAIN}/api/videos?slug=${encodeURIComponent(realSlug)}`,
-      { headers: qmhHeaders },
-      5000
+      qmhHeaders,
+      8500
     );
-    if (
-      apiRes.ok &&
-      (apiRes.headers.get("content-type") || "").includes("json")
-    ) {
-      const vData = await apiRes.json();
+    debugInfo.apiVia = apiVia;
+    if (apiText && apiText.trim().startsWith("{")) {
+      const vData = JSON.parse(apiText);
       if (vData && !vData.error) {
         if (vData.title) title = cleanText(vData.title);
         if (vData.thumbnail) {
@@ -2368,7 +2586,7 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
     }
   } catch (_) {}
 
-  // 2. Nếu chưa có nguồn phát, quét trực tiếp trang HTML `https://qmhv3.top/watch/<slug>`
+  // 2. Nếu chưa có nguồn phát, quét trang HTML `https://qmhv3.top/watch/<slug>`
   if (customSources.length === 0) {
     const { html: watchHtml, via } = await fetchHtmlWithFallback(
       postLink,
@@ -2398,7 +2616,6 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
         thumbnail = unwrapQmhMediaUrl(ogImg[1]);
       }
 
-      // Quét các nút Server nếu qmhv3.top dùng cấu trúc nút bấm
       const servers = extractViet69Servers(watchHtml);
       if (servers.length > 0) {
         const ajaxResults = await Promise.all(
@@ -2420,7 +2637,6 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
         });
       }
 
-      // Quét mọi link .m3u8, .mp4, <video>, <iframe> trong cả HTML và Next.js RSC Flight payload
       const extractedMedia = parsePlayerHtml(
         watchHtml + "\n" + unescapedHtml,
         QMH_DOMAIN
@@ -2457,7 +2673,6 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
 
   customSources.sort((a, b) => (a.priority || 5) - (b.priority || 5));
 
-  // Loại bỏ các source trùng URL
   const uniqueSources = [];
   const seenUrls = new Set();
   for (const s of customSources) {
@@ -3125,7 +3340,6 @@ export async function GET(req) {
     baseDomain = "https://viet69.be";
   }
 
-  // Nếu người dùng nhập qmhv3.top vào ô Nguồn cài đặt thì tự động chuyển qua bộ xử lý QMH
   if (baseHost.includes("qmhv3")) {
     if (rawSlugParam) {
       const qmhVideo = await fetchQmhVideoDetail(decodeSlug(rawSlugParam));
@@ -3436,7 +3650,7 @@ export async function GET(req) {
   }
 
   // =================================================================
-  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO VIET69
+  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO (GỘP QMH VÀO TAB "TẤT CẢ" + CÁC TAB VIET69)
   // =================================================================
   try {
     const cleanCat = decodeSlug(category);
@@ -3457,22 +3671,32 @@ export async function GET(req) {
         : `${baseDomain}/${pageSuffix}`;
       const targetUrl = appendSort(baseTarget);
 
-      const { html } = await fetchHtmlWithFallback(
-        targetUrl,
-        reqHeaders,
-        true,
-        false
-      );
-      if (html) {
-        const navCategories = extractNavCategories(html, baseDomain, baseHost);
-        const rawItems = parseVideoListHtml(
-          html,
-          baseDomain,
-          baseHost,
-          "all"
-        );
-        const items = sortVideoItems(rawItems, sortBy);
-        const totalPages = extractTotalPagesFromHtml(html, page, false);
+      // Tải song song cả trang chủ Viet69 lẫn danh sách QMH để gắn video QMH lên trang chủ
+      const [viet69Res, qmhRes] = await Promise.all([
+        fetchHtmlWithFallback(targetUrl, reqHeaders, true, false),
+        fetchQmhVideoList({ page, q, sortBy }).catch(() => ({ items: [] }))
+      ]);
+
+      const { html } = viet69Res;
+      const qmhItems = Array.isArray(qmhRes?.items) ? qmhRes.items : [];
+
+      if (html || qmhItems.length > 0) {
+        const navCategories = html
+          ? extractNavCategories(html, baseDomain, baseHost)
+          : [];
+        const rawViet69Items = html
+          ? parseVideoListHtml(html, baseDomain, baseHost, "all")
+          : [];
+
+        // Đưa 8 video mới nhất của QMH lên đầu trang Tất cả (xen kẽ với Viet69)
+        const combinedItems = [
+          ...qmhItems.slice(0, 8),
+          ...rawViet69Items
+        ];
+        const items = sortVideoItems(combinedItems, sortBy);
+        const totalPages = html
+          ? extractTotalPagesFromHtml(html, page, false)
+          : qmhRes?.totalPages || 1;
 
         if (items.length > 0) {
           return NextResponse.json(
@@ -3507,7 +3731,10 @@ export async function GET(req) {
       const addCandidateWithPagination = (basePath) => {
         const cleanP = String(basePath || "").replace(/^\/+|\/+$/g, "");
         if (!cleanP) return;
-        if (!isMemberCat && (cleanP === "bai-viet" || cleanP.includes("video-cua-thanh-vien"))) {
+        if (
+          !isMemberCat &&
+          (cleanP === "bai-viet" || cleanP.includes("video-cua-thanh-vien"))
+        ) {
           return;
         }
         if (page <= 1) {
