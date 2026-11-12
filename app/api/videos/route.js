@@ -415,7 +415,6 @@ async function fetchHtmlWithFallback(
   return { html: "", via: "failed", status, cookies: "" };
 }
 
-// Đua song song Direct và Proxy trong tối đa 4 giây để KHÔNG BAO GIỜ gây treo Vercel 10s
 async function fetchFastText(targetUrl, headers, timeoutMs = 4000) {
   const attempts = [
     fetchWithTimeout(targetUrl, { headers }, timeoutMs).then(async (r) => {
@@ -1961,7 +1960,7 @@ function sortVideoItems(items = [], sortBy = "latest") {
 }
 
 // =====================================================================
-// BỘ BÓC TÁCH NHANH CHO NGUỒN QMHV3.TOP (CHẠY SONG SONG DƯỚI 4.5 GIÂY)
+// BỘ GIẢI MÃ CHUYÊN SÂU GÓI 315KB NEXT.JS RSC FLIGHT & API QMHV3.TOP
 // =====================================================================
 function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
   if (!rawJson) return null;
@@ -1974,35 +1973,43 @@ function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
     }
   }
 
-  const rawList = Array.isArray(obj)
-    ? obj
-    : Array.isArray(obj?.items)
-    ? obj.items
-    : Array.isArray(obj?.data)
-    ? obj.data
-    : Array.isArray(obj?.videos)
-    ? obj.videos
-    : Array.isArray(obj?.movies)
-    ? obj.movies
-    : Array.isArray(obj?.results)
-    ? obj.results
-    : Array.isArray(obj?.list)
-    ? obj.list
-    : Array.isArray(obj?.posts)
-    ? obj.posts
-    : [];
+  let foundArray = [];
+  const findVideoArray = (node) => {
+    if (!node || foundArray.length > 0) return;
+    if (Array.isArray(node)) {
+      if (
+        node.length >= 2 &&
+        typeof node[0] === "object" &&
+        node[0] !== null &&
+        (node[0].slug || node[0].title || node[0].name || node[0].vod_name)
+      ) {
+        foundArray = node;
+        return;
+      }
+      for (const el of node) findVideoArray(el);
+      return;
+    }
+    if (typeof node === "object") {
+      for (const k of Object.keys(node)) {
+        findVideoArray(node[k]);
+      }
+    }
+  };
+  findVideoArray(obj);
 
-  if (rawList.length === 0) return null;
+  if (foundArray.length === 0) return null;
 
   const items = [];
-  for (const item of rawList) {
+  const seen = new Set();
+
+  for (const item of foundArray) {
     if (!item || typeof item !== "object") continue;
     let rawSlug = String(
       item.slug ||
+        item.code ||
+        item.vod_id ||
         item.id ||
         item._id ||
-        item.vod_id ||
-        item.code ||
         item.link ||
         item.url ||
         ""
@@ -2013,8 +2020,28 @@ function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
       .replace(/^https?:\/\/[^/]+/i, "")
       .replace(/^\/?watch\//i, "")
       .replace(/^\/+|\/+$/g, "");
-    if (!rawSlug) continue;
 
+    if (
+      !rawSlug ||
+      seen.has(rawSlug) ||
+      /^(?:crash|dice|plinko|limbo|mines|slots|roulette|blackjack|baccarat|keno|wheel|hilo|casino|lottery)$/i.test(
+        rawSlug
+      )
+    ) {
+      continue;
+    }
+
+    const title = cleanText(
+      String(
+        item.title ||
+          item.name ||
+          item.vod_name ||
+          rawSlug.replace(/-/g, " ")
+      )
+    );
+    if (!title || title.length < 3) continue;
+
+    seen.add(rawSlug);
     const fullSlug = rawSlug.startsWith("qmh__")
       ? rawSlug
       : `qmh__${rawSlug}`;
@@ -2027,6 +2054,7 @@ function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
         item.cover ||
         item.pic ||
         item.vod_pic ||
+        item.avatar ||
         ""
     ).trim();
 
@@ -2034,28 +2062,21 @@ function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
     else if (thumb.startsWith("/")) thumb = `${baseDomain}${thumb}`;
     if (!thumb.startsWith("http")) thumb = FALLBACK_THUMB;
 
-    const title = cleanText(
-      String(
-        item.title ||
-          item.name ||
-          item.vod_name ||
-          rawSlug.replace(/-/g, " ")
-      )
-    );
-
     items.push({
-      ...item,
       id: fullSlug,
       slug: fullSlug,
-      title: title || rawSlug,
+      title,
       category: "qmh-movie",
       thumbnail: thumb,
       thumb,
       poster: thumb,
       image: thumb,
-      views: String(item.views ?? item.view ?? "0"),
-      comments: String(item.comments ?? item.comment ?? "0"),
-      likes: String(item.likes ?? item.like ?? "0")
+      duration: String(item.duration || item.time || ""),
+      views: String(item.views ?? item.view ?? item.viewCount ?? "0"),
+      comments: String(
+        item.comments ?? item.comment ?? item.commentCount ?? "0"
+      ),
+      likes: String(item.likes ?? item.like ?? item.likeCount ?? "0")
     });
   }
 
@@ -2068,7 +2089,8 @@ function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
         obj?.total_pages ||
         obj?.pageCount ||
         obj?.last_page ||
-        10
+        obj?.pagination?.totalPages ||
+        20
     )
   );
 
@@ -2080,134 +2102,209 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
   const seen = new Set();
   if (!html) return items;
 
-  const unescaped = html
-    .replace(/\\"/g, '"')
-    .replace(/\\\//g, "/");
+  const CASINO_BLACKLIST = new Set([
+    "crash",
+    "dice",
+    "plinko",
+    "limbo",
+    "mines",
+    "slots",
+    "roulette",
+    "blackjack",
+    "baccarat",
+    "keno",
+    "wheel",
+    "hilo",
+    "casino",
+    "lottery",
+    "sports",
+    "promotions",
+    "vip",
+    "affiliate",
+    "help",
+    "fairness"
+  ]);
 
-  const watchLinkRegex =
-    /<a\b[^>]*href=["']?(?:https?:\/\/[^"'\s>]*)?\/watch\/([^"'/?#\s>]+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = watchLinkRegex.exec(html)) !== null) {
-    const rawSlug = m[1].trim();
-    if (!rawSlug || seen.has(rawSlug)) continue;
+  const registerCandidate = (rawSlug, rawTitle, rawThumb, extra = {}) => {
+    let s = String(rawSlug || "")
+      .trim()
+      .replace(/^https?:\/\/[^/]+/i, "")
+      .replace(/^\/?watch\//i, "")
+      .replace(/^\/+|\/+$/g, "");
 
-    const aInner = m[2] || "";
-    const startCtx = Math.max(0, m.index - 350);
-    const endCtx = Math.min(html.length, m.index + m[0].length + 700);
-    const contextBlock = html.slice(startCtx, endCtx);
-
-    const thumb =
-      extractThumbnailFromBlock(aInner, baseDomain) ||
-      extractThumbnailFromBlock(contextBlock, baseDomain) ||
-      FALLBACK_THUMB;
-
-    const titleFromAttr =
-      m[0].match(/\btitle=["']([^"']+)["']/i) ||
-      aInner.match(/\balt=["']([^"']+)["']/i) ||
-      aInner.match(/<h[1-5][^>]*>([\s\S]*?)<\/h[1-5]>/i) ||
-      contextBlock.match(/<h[1-5][^>]*>([\s\S]*?)<\/h[1-5]>/i) ||
-      contextBlock.match(/\balt=["']([^"']+)["']/i);
-
-    let title = titleFromAttr
-      ? cleanText(titleFromAttr[1])
-      : cleanText(aInner);
-    if (!title || title.length < 2) {
-      title = rawSlug.replace(/-/g, " ");
+    if (
+      !s ||
+      s.length < 4 ||
+      s.includes("/") ||
+      s.includes(" ") ||
+      seen.has(s) ||
+      CASINO_BLACKLIST.has(s.toLowerCase()) ||
+      /^(?:page|category|tag|tab|login|register|profile)$/i.test(s)
+    ) {
+      return;
     }
 
-    seen.add(rawSlug);
-    const stats = extractStatsFromBlock(contextBlock);
-    const fullSlug = rawSlug.startsWith("qmh__")
-      ? rawSlug
-      : `qmh__${rawSlug}`;
+    let t = cleanText(String(rawTitle || ""));
+    if (!t || t.length < 3) {
+      t = s.replace(/-/g, " ");
+    }
+
+    let img = String(rawThumb || "").trim().replace(/&amp;/g, "&");
+    if (img.includes("/_next/image") && img.includes("url=")) {
+      try {
+        const uObj = new URL(img, baseDomain);
+        img = decodeURIComponent(uObj.searchParams.get("url") || "");
+      } catch (_) {}
+    }
+    if (img.startsWith("//")) img = `https:${img}`;
+    else if (img.startsWith("/")) img = `${baseDomain}${img}`;
+    if (
+      !img.startsWith("http") ||
+      /logo|favicon|icon|list-top-images/i.test(img)
+    ) {
+      img = FALLBACK_THUMB;
+    }
+
+    seen.add(s);
+    const fullSlug = s.startsWith("qmh__") ? s : `qmh__${s}`;
 
     items.push({
       id: fullSlug,
       slug: fullSlug,
-      title,
+      title: t,
       category: "qmh-movie",
-      thumbnail: thumb,
-      thumb,
-      poster: thumb,
-      image: thumb,
-      duration: "",
-      views: stats.views,
-      comments: stats.comments,
-      likes: stats.likes
+      thumbnail: img,
+      thumb: img,
+      poster: img,
+      image: img,
+      duration: String(extra.duration || ""),
+      views: String(extra.views ?? "0"),
+      comments: String(extra.comments ?? "0"),
+      likes: String(extra.likes ?? "0")
     });
+  };
+
+  let normalizedText = html
+    .replace(/\\"/g, '"')
+    .replace(/\\\//g, "/")
+    .replace(/\\n/g, " ");
+
+  normalizedText = normalizedText.replace(
+    /\\u([0-9a-fA-F]{4})/g,
+    (_, hex) => String.fromCharCode(parseInt(hex, 16))
+  );
+
+  // 1. Quét mọi vị trí có khóa `"slug":"..."` trong 315KB
+  const slugKeyRegex = /"slug"\s*:\s*"([a-zA-Z0-9_-]{4,140})"/g;
+  let sm;
+  while ((sm = slugKeyRegex.exec(normalizedText)) !== null) {
+    const candidateSlug = sm[1];
+    const windowStart = Math.max(0, sm.index - 450);
+    const windowEnd = Math.min(normalizedText.length, sm.index + 900);
+    const chunk = normalizedText.slice(windowStart, windowEnd);
+
+    const titleM = chunk.match(
+      /"(?:title|name|vod_name|label)"\s*:\s*"([^"]{3,220})"/i
+    );
+    const thumbM = chunk.match(
+      /"(?:thumbnail|thumb|poster|image|cover|pic|vod_pic|posterUrl|thumbUrl)"\s*:\s*"([^"]{5,400})"/i
+    );
+    const viewsM = chunk.match(
+      /"(?:views|view|viewCount)"\s*:\s*"?(\d[\d,.]*[kKmM]?)"?/i
+    );
+    const likesM = chunk.match(
+      /"(?:likes|like|likeCount)"\s*:\s*"?(\d[\d,.]*[kKmM]?)"?/i
+    );
+    const durM = chunk.match(
+      /"(?:duration|time|length)"\s*:\s*"([^"]{1,20})"/i
+    );
+
+    if (titleM || thumbM) {
+      registerCandidate(
+        candidateSlug,
+        titleM ? titleM[1] : candidateSlug.replace(/-/g, " "),
+        thumbM ? thumbM[1] : "",
+        {
+          views: viewsM ? viewsM[1] : "0",
+          likes: likesM ? likesM[1] : "0",
+          duration: durM ? durM[1] : ""
+        }
+      );
+    }
   }
 
-  if (items.length < 4) {
-    const anyWatchSlugRegex = /\/watch\/([a-zA-Z0-9_-]{5,120})/g;
-    let wm;
-    while ((wm = anyWatchSlugRegex.exec(unescaped)) !== null) {
-      const rawSlug = wm[1].trim();
-      if (!rawSlug || seen.has(rawSlug)) continue;
+  // 2. Quét mọi đường dẫn `/watch/<slug>`
+  const watchRegex = /\/watch\/([a-zA-Z0-9_-]{4,140})/g;
+  let wm;
+  while ((wm = watchRegex.exec(normalizedText)) !== null) {
+    const candidateSlug = wm[1];
+    if (seen.has(candidateSlug)) continue;
+    const windowStart = Math.max(0, wm.index - 450);
+    const windowEnd = Math.min(normalizedText.length, wm.index + 900);
+    const chunk = normalizedText.slice(windowStart, windowEnd);
 
-      const sliceAround = unescaped.slice(
-        Math.max(0, wm.index - 400),
-        Math.min(unescaped.length, wm.index + 600)
+    const titleM =
+      chunk.match(/"(?:title|name|alt)"\s*:\s*"([^"]{3,220})"/i) ||
+      chunk.match(/<h[1-5][^>]*>([\s\S]*?)<\/h[1-5]>/i) ||
+      chunk.match(/\balt=["']([^"']{3,200})["']/i);
+    const thumbM =
+      chunk.match(
+        /"(?:thumbnail|thumb|poster|image|cover|src)"\s*:\s*"(https?:\/\/[^"\s]+|\/[^"\s]+\.(?:jpg|jpeg|png|webp|avif)[^"\s]*)"/i
+      ) ||
+      chunk.match(
+        /\bsrc=["'](https?:\/\/[^"'\s]+|\/[^"'\s]+\.(?:jpg|jpeg|png|webp|avif)[^"'\s]*)["']/i
       );
-      const titleM = sliceAround.match(
-        /"(?:title|name)"\s*:\s*"([^"]{3,200})"/i
+
+    registerCandidate(
+      candidateSlug,
+      titleM ? titleM[1] : candidateSlug.replace(/-/g, " "),
+      thumbM ? thumbM[1] : ""
+    );
+  }
+
+  // 3. Dự phòng quét theo cặp `"id"` / `"code"` + `"title"`
+  if (items.length === 0) {
+    const cardRegex =
+      /"(?:id|_id|code|videoId)"\s*:\s*"([a-zA-Z0-9_-]{5,140})"[\s\S]{0,500}?"(?:title|name)"\s*:\s*"([^"]{3,220})"/gi;
+    let cm;
+    while ((cm = cardRegex.exec(normalizedText)) !== null) {
+      const cSlug = cm[1];
+      const cTitle = cm[2];
+      const chunk = normalizedText.slice(
+        Math.max(0, cm.index - 300),
+        Math.min(normalizedText.length, cm.index + 700)
       );
-      const thumbM = sliceAround.match(
-        /"(?:thumbnail|thumb|poster|image|cover)"\s*:\s*"([^"]+)"/i
+      const thumbM = chunk.match(
+        /"(?:thumbnail|thumb|poster|image|cover|src)"\s*:\s*"([^"]{5,400})"/i
       );
-
-      let thumb = thumbM ? thumbM[1] : FALLBACK_THUMB;
-      if (thumb.startsWith("/") && !thumb.startsWith("//")) {
-        thumb = `${baseDomain}${thumb}`;
-      }
-      const title = titleM
-        ? cleanText(titleM[1])
-        : rawSlug.replace(/-/g, " ");
-
-      seen.add(rawSlug);
-      const fullSlug = rawSlug.startsWith("qmh__")
-        ? rawSlug
-        : `qmh__${rawSlug}`;
-
-      items.push({
-        id: fullSlug,
-        slug: fullSlug,
-        title,
-        category: "qmh-movie",
-        thumbnail: thumb,
-        thumb,
-        poster: thumb,
-        image: thumb,
-        duration: "",
-        views: "0",
-        comments: "0",
-        likes: "0"
-      });
+      registerCandidate(cSlug, cTitle, thumbM ? thumbM[1] : "");
     }
   }
 
   return items;
 }
 
-// Chạy SONG SONG cả API và HTML của qmhv3.top trong tối đa 4 giây (Tuyệt đối không chạy tuần tự gây timeout 504)
 async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
   const qmhHeaders = {
     ...BROWSER_HEADERS,
     Referer: `${QMH_DOMAIN}/`
   };
 
-  const apiUrl = `${QMH_DOMAIN}/api/videos?category=movie&page=${page}&sort=${sortBy}${
-    q ? `&q=${encodeURIComponent(q)}` : ""
-  }`;
   const htmlUrl = q
     ? `${QMH_DOMAIN}/?tab=casino&category=movie&q=${encodeURIComponent(q)}&page=${page}`
     : `${QMH_DOMAIN}/?tab=casino&category=movie&page=${page}`;
+  const altHtmlUrl = `${QMH_DOMAIN}/?category=movie&page=${page}`;
+  const apiUrl = `${QMH_DOMAIN}/api/videos?category=movie&page=${page}&sort=${sortBy}${
+    q ? `&q=${encodeURIComponent(q)}` : ""
+  }`;
 
-  const [apiRes, htmlRes] = await Promise.all([
-    fetchFastText(apiUrl, qmhHeaders, 4000),
-    fetchFastText(htmlUrl, qmhHeaders, 4000)
+  const [htmlRes, altHtmlRes, apiRes] = await Promise.all([
+    fetchFastText(htmlUrl, qmhHeaders, 4500),
+    fetchFastText(altHtmlUrl, qmhHeaders, 4500),
+    fetchFastText(apiUrl, qmhHeaders, 4000)
   ]);
 
-  if (apiRes.text) {
+  if (apiRes.text && apiRes.text.length > 200) {
     const normalized = normalizeQmhJsonItems(apiRes.text, QMH_DOMAIN);
     if (normalized && normalized.items.length > 0) {
       return {
@@ -2220,18 +2317,43 @@ async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
     }
   }
 
-  if (htmlRes.text) {
-    const parsedFromHtml = parseQmhListFromHtml(htmlRes.text, QMH_DOMAIN);
+  const primaryHtml =
+    htmlRes.text.length >= altHtmlRes.text.length
+      ? htmlRes.text
+      : altHtmlRes.text;
+
+  if (primaryHtml) {
+    const parsedFromHtml = parseQmhListFromHtml(primaryHtml, QMH_DOMAIN);
     if (parsedFromHtml.length > 0) {
-      const totalPages = extractTotalPagesFromHtml(htmlRes.text, page, false);
+      const totalPages = Math.max(
+        page + 5,
+        extractTotalPagesFromHtml(primaryHtml, page, false)
+      );
       return {
         items: sortVideoItems(parsedFromHtml, sortBy),
         page,
-        totalPages: Math.max(page, totalPages),
-        total: Math.max(page, totalPages) * parsedFromHtml.length,
+        totalPages,
+        total: totalPages * parsedFromHtml.length,
         categories: []
       };
     }
+  }
+
+  let sampleData = "";
+  if (primaryHtml) {
+    const unesc = primaryHtml.replace(/\\"/g, '"').replace(/\\\//g, "/");
+    const watchIdx = unesc.indexOf("watch");
+    const movieIdx = unesc.indexOf("movie");
+    const bodyIdx = unesc.indexOf("<body");
+    const pivot =
+      watchIdx !== -1
+        ? watchIdx
+        : movieIdx !== -1
+        ? movieIdx
+        : bodyIdx !== -1
+        ? bodyIdx
+        : Math.floor(unesc.length * 0.5);
+    sampleData = unesc.slice(Math.max(0, pivot - 200), pivot + 800);
   }
 
   return {
@@ -2243,9 +2365,10 @@ async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
     _debug: {
       apiVia: apiRes.via,
       apiLen: apiRes.text.length,
+      apiPreview: apiRes.text.slice(0, 120),
       htmlVia: htmlRes.via,
-      htmlLen: htmlRes.text.length,
-      htmlSnippet: htmlRes.text ? htmlRes.text.slice(0, 350) : ""
+      htmlLen: primaryHtml.length,
+      dataSampleAroundMovieOrWatch: sampleData
     }
   };
 }
@@ -3390,7 +3513,7 @@ export async function GET(req) {
   }
 
   // =================================================================
-  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO VIET69 (ĐỘC LẬP, PHẢN HỒI TỨC THÌ)
+  // TRƯỜNG HỢP 2: LẤY DANH SÁCH VIDEO VIET69
   // =================================================================
   try {
     const cleanCat = decodeSlug(category);
