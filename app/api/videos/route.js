@@ -205,6 +205,43 @@ const SYSTEM_TITLES_BLACKLIST = [
   "trang chủ"
 ];
 
+// Danh sách đen chặn sạch 100% các banner sảnh cược & game trên qmhv3.top
+const QMH_CASINO_BLACKLIST = [
+  "banner",
+  "win-big",
+  "defi",
+  "lottery",
+  "jackpot",
+  "3333-vnd",
+  "3333vnd",
+  "currency",
+  "nnd",
+  "vip-3-ngay",
+  "mien-phi-vip",
+  "minimal-crash",
+  "crash",
+  "dice",
+  "plinko",
+  "limbo",
+  "mines",
+  "slots",
+  "roulette",
+  "blackjack",
+  "baccarat",
+  "keno",
+  "wheel",
+  "hilo",
+  "casino",
+  "sports",
+  "promotions",
+  "affiliate",
+  "fairness",
+  "help",
+  " wallet",
+  "deposit",
+  "withdraw"
+];
+
 const navPathCache = new Map();
 const sortParamCache = new Map();
 
@@ -274,6 +311,24 @@ function isSystemLinkOrTitle(slug = "", title = "") {
   if (
     SYSTEM_TITLES_BLACKLIST.some(
       (b) => t === b || t.startsWith(b + " (") || t.startsWith(b + " -")
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isQmhCasinoOrBanner(slug = "", title = "") {
+  const s = String(slug || "").toLowerCase().trim();
+  const t = String(title || "").toLowerCase().trim();
+  if (!s || s.length < 4 || s.includes("/") || s.includes(" ")) return true;
+  if (/^banner[-_\d]*$/i.test(s) || /^slide[-_\d]*$/i.test(s)) return true;
+  if (QMH_CASINO_BLACKLIST.some((b) => s.includes(b) || t.includes(b))) {
+    return true;
+  }
+  if (
+    /win big|lottery|jackpot|3333\s*vnd|new currency|miễn phí vip|minimal crash/i.test(
+      t
     )
   ) {
     return true;
@@ -1666,6 +1721,7 @@ function extractThumbnailFromBlock(block = "", baseDomain = "") {
       lower.includes("logo") ||
       lower.includes("favicon") ||
       lower.includes("avatar") ||
+      lower.includes("list-top-images") ||
       lower.includes("/themes/") ||
       lower.includes("/plugins/")
     );
@@ -1960,7 +2016,7 @@ function sortVideoItems(items = [], sortBy = "latest") {
 }
 
 // =====================================================================
-// BỘ GIẢI MÃ CHUYÊN SÂU GÓI 315KB NEXT.JS RSC FLIGHT & API QMHV3.TOP
+// BỘ GIẢI MÃ CHUYÊN SÂU KHO PHIM THẬT QMHV3.TOP (CHẶN 100% BANNER CASINO)
 // =====================================================================
 function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
   if (!rawJson) return null;
@@ -1973,111 +2029,109 @@ function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
     }
   }
 
-  let foundArray = [];
-  const findVideoArray = (node) => {
-    if (!node || foundArray.length > 0) return;
+  const candidateArrays = [];
+  const collectArrays = (node) => {
+    if (!node) return;
     if (Array.isArray(node)) {
       if (
         node.length >= 2 &&
         typeof node[0] === "object" &&
-        node[0] !== null &&
-        (node[0].slug || node[0].title || node[0].name || node[0].vod_name)
+        node[0] !== null
       ) {
-        foundArray = node;
-        return;
+        candidateArrays.push(node);
       }
-      for (const el of node) findVideoArray(el);
+      for (const el of node) collectArrays(el);
       return;
     }
     if (typeof node === "object") {
       for (const k of Object.keys(node)) {
-        findVideoArray(node[k]);
+        collectArrays(node[k]);
       }
     }
   };
-  findVideoArray(obj);
-
-  if (foundArray.length === 0) return null;
+  collectArrays(obj);
 
   const items = [];
   const seen = new Set();
 
-  for (const item of foundArray) {
-    if (!item || typeof item !== "object") continue;
-    let rawSlug = String(
-      item.slug ||
-        item.code ||
-        item.vod_id ||
-        item.id ||
-        item._id ||
-        item.link ||
-        item.url ||
-        ""
-    ).trim();
+  for (const arr of candidateArrays) {
+    for (const item of arr) {
+      if (!item || typeof item !== "object") continue;
+      let rawSlug = String(
+        item.slug ||
+          item.code ||
+          item.vod_id ||
+          item.id ||
+          item._id ||
+          item.link ||
+          item.url ||
+          ""
+      ).trim();
 
-    if (!rawSlug) continue;
-    rawSlug = rawSlug
-      .replace(/^https?:\/\/[^/]+/i, "")
-      .replace(/^\/?watch\//i, "")
-      .replace(/^\/+|\/+$/g, "");
+      if (!rawSlug) continue;
+      rawSlug = rawSlug
+        .replace(/^https?:\/\/[^/]+/i, "")
+        .replace(/^\/?watch\//i, "")
+        .replace(/^\/+|\/+$/g, "");
 
-    if (
-      !rawSlug ||
-      seen.has(rawSlug) ||
-      /^(?:crash|dice|plinko|limbo|mines|slots|roulette|blackjack|baccarat|keno|wheel|hilo|casino|lottery)$/i.test(
-        rawSlug
-      )
-    ) {
-      continue;
+      const title = cleanText(
+        String(
+          item.title ||
+            item.name ||
+            item.vod_name ||
+            rawSlug.replace(/-/g, " ")
+        )
+      );
+
+      // Chặn toàn bộ banner quảng cáo cược và game casino
+      if (isQmhCasinoOrBanner(rawSlug, title) || seen.has(rawSlug)) {
+        continue;
+      }
+
+      let thumb = String(
+        item.thumbnail ||
+          item.thumb ||
+          item.poster ||
+          item.image ||
+          item.cover ||
+          item.pic ||
+          item.vod_pic ||
+          ""
+      ).trim();
+
+      if (thumb.startsWith("//")) thumb = `https:${thumb}`;
+      else if (thumb.startsWith("/")) thumb = `${baseDomain}${thumb}`;
+
+      // Phim thật luôn có ảnh thumbnail hợp lệ
+      if (
+        !thumb.startsWith("http") ||
+        /logo|favicon|list-top-images|banner/i.test(thumb)
+      ) {
+        continue;
+      }
+
+      seen.add(rawSlug);
+      const fullSlug = rawSlug.startsWith("qmh__")
+        ? rawSlug
+        : `qmh__${rawSlug}`;
+
+      items.push({
+        id: fullSlug,
+        slug: fullSlug,
+        title,
+        category: "qmh-movie",
+        thumbnail: thumb,
+        thumb,
+        poster: thumb,
+        image: thumb,
+        duration: String(item.duration || item.time || ""),
+        views: String(item.views ?? item.view ?? item.viewCount ?? "0"),
+        comments: String(
+          item.comments ?? item.comment ?? item.commentCount ?? "0"
+        ),
+        likes: String(item.likes ?? item.like ?? item.likeCount ?? "0")
+      });
     }
-
-    const title = cleanText(
-      String(
-        item.title ||
-          item.name ||
-          item.vod_name ||
-          rawSlug.replace(/-/g, " ")
-      )
-    );
-    if (!title || title.length < 3) continue;
-
-    seen.add(rawSlug);
-    const fullSlug = rawSlug.startsWith("qmh__")
-      ? rawSlug
-      : `qmh__${rawSlug}`;
-
-    let thumb = String(
-      item.thumbnail ||
-        item.thumb ||
-        item.poster ||
-        item.image ||
-        item.cover ||
-        item.pic ||
-        item.vod_pic ||
-        item.avatar ||
-        ""
-    ).trim();
-
-    if (thumb.startsWith("//")) thumb = `https:${thumb}`;
-    else if (thumb.startsWith("/")) thumb = `${baseDomain}${thumb}`;
-    if (!thumb.startsWith("http")) thumb = FALLBACK_THUMB;
-
-    items.push({
-      id: fullSlug,
-      slug: fullSlug,
-      title,
-      category: "qmh-movie",
-      thumbnail: thumb,
-      thumb,
-      poster: thumb,
-      image: thumb,
-      duration: String(item.duration || item.time || ""),
-      views: String(item.views ?? item.view ?? item.viewCount ?? "0"),
-      comments: String(
-        item.comments ?? item.comment ?? item.commentCount ?? "0"
-      ),
-      likes: String(item.likes ?? item.like ?? item.likeCount ?? "0")
-    });
   }
 
   if (items.length === 0) return null;
@@ -2102,29 +2156,6 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
   const seen = new Set();
   if (!html) return items;
 
-  const CASINO_BLACKLIST = new Set([
-    "crash",
-    "dice",
-    "plinko",
-    "limbo",
-    "mines",
-    "slots",
-    "roulette",
-    "blackjack",
-    "baccarat",
-    "keno",
-    "wheel",
-    "hilo",
-    "casino",
-    "lottery",
-    "sports",
-    "promotions",
-    "vip",
-    "affiliate",
-    "help",
-    "fairness"
-  ]);
-
   const registerCandidate = (rawSlug, rawTitle, rawThumb, extra = {}) => {
     let s = String(rawSlug || "")
       .trim()
@@ -2132,21 +2163,13 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
       .replace(/^\/?watch\//i, "")
       .replace(/^\/+|\/+$/g, "");
 
-    if (
-      !s ||
-      s.length < 4 ||
-      s.includes("/") ||
-      s.includes(" ") ||
-      seen.has(s) ||
-      CASINO_BLACKLIST.has(s.toLowerCase()) ||
-      /^(?:page|category|tag|tab|login|register|profile)$/i.test(s)
-    ) {
-      return;
-    }
-
     let t = cleanText(String(rawTitle || ""));
     if (!t || t.length < 3) {
       t = s.replace(/-/g, " ");
+    }
+
+    if (isQmhCasinoOrBanner(s, t) || seen.has(s)) {
+      return;
     }
 
     let img = String(rawThumb || "").trim().replace(/&amp;/g, "&");
@@ -2158,11 +2181,13 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
     }
     if (img.startsWith("//")) img = `https:${img}`;
     else if (img.startsWith("/")) img = `${baseDomain}${img}`;
+
+    // Bắt buộc phải có ảnh bìa thật (Loại bỏ các object chỉ có chữ của sảnh cược)
     if (
       !img.startsWith("http") ||
-      /logo|favicon|icon|list-top-images/i.test(img)
+      /logo|favicon|icon|list-top-images|banner/i.test(img)
     ) {
-      img = FALLBACK_THUMB;
+      return;
     }
 
     seen.add(s);
@@ -2194,62 +2219,53 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
     (_, hex) => String.fromCharCode(parseInt(hex, 16))
   );
 
-  // 1. Quét mọi vị trí có khóa `"slug":"..."` trong 315KB
-  const slugKeyRegex = /"slug"\s*:\s*"([a-zA-Z0-9_-]{4,140})"/g;
-  let sm;
-  while ((sm = slugKeyRegex.exec(normalizedText)) !== null) {
-    const candidateSlug = sm[1];
-    const windowStart = Math.max(0, sm.index - 450);
-    const windowEnd = Math.min(normalizedText.length, sm.index + 900);
-    const chunk = normalizedText.slice(windowStart, windowEnd);
+  // 1. Quét mọi thẻ <a href="/watch/<slug>"> trong HTML
+  const watchLinkRegex =
+    /<a\b[^>]*href=["']?(?:https?:\/\/[^"'\s>]*)?\/watch\/([^"'/?#\s>]+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = watchLinkRegex.exec(html)) !== null) {
+    const rawSlug = m[1].trim();
+    const aInner = m[2] || "";
+    const startCtx = Math.max(0, m.index - 350);
+    const endCtx = Math.min(html.length, m.index + m[0].length + 700);
+    const contextBlock = html.slice(startCtx, endCtx);
 
-    const titleM = chunk.match(
-      /"(?:title|name|vod_name|label)"\s*:\s*"([^"]{3,220})"/i
-    );
-    const thumbM = chunk.match(
-      /"(?:thumbnail|thumb|poster|image|cover|pic|vod_pic|posterUrl|thumbUrl)"\s*:\s*"([^"]{5,400})"/i
-    );
-    const viewsM = chunk.match(
-      /"(?:views|view|viewCount)"\s*:\s*"?(\d[\d,.]*[kKmM]?)"?/i
-    );
-    const likesM = chunk.match(
-      /"(?:likes|like|likeCount)"\s*:\s*"?(\d[\d,.]*[kKmM]?)"?/i
-    );
-    const durM = chunk.match(
-      /"(?:duration|time|length)"\s*:\s*"([^"]{1,20})"/i
-    );
+    const thumb =
+      extractThumbnailFromBlock(aInner, baseDomain) ||
+      extractThumbnailFromBlock(contextBlock, baseDomain);
 
-    if (titleM || thumbM) {
-      registerCandidate(
-        candidateSlug,
-        titleM ? titleM[1] : candidateSlug.replace(/-/g, " "),
-        thumbM ? thumbM[1] : "",
-        {
-          views: viewsM ? viewsM[1] : "0",
-          likes: likesM ? likesM[1] : "0",
-          duration: durM ? durM[1] : ""
-        }
-      );
-    }
+    const titleFromAttr =
+      m[0].match(/\btitle=["']([^"']+)["']/i) ||
+      aInner.match(/\balt=["']([^"']+)["']/i) ||
+      aInner.match(/<h[1-5][^>]*>([\s\S]*?)<\/h[1-5]>/i) ||
+      contextBlock.match(/<h[1-5][^>]*>([\s\S]*?)<\/h[1-5]>/i) ||
+      contextBlock.match(/\balt=["']([^"']+)["']/i);
+
+    const title = titleFromAttr
+      ? cleanText(titleFromAttr[1])
+      : cleanText(aInner);
+    const stats = extractStatsFromBlock(contextBlock);
+
+    registerCandidate(rawSlug, title, thumb, stats);
   }
 
-  // 2. Quét mọi đường dẫn `/watch/<slug>`
-  const watchRegex = /\/watch\/([a-zA-Z0-9_-]{4,140})/g;
+  // 2. Quét mọi đường dẫn `/watch/<slug>` trong gói RSC Flight
+  const watchRegex = /\/watch\/([a-zA-Z0-9_-]{5,140})/g;
   let wm;
   while ((wm = watchRegex.exec(normalizedText)) !== null) {
     const candidateSlug = wm[1];
     if (seen.has(candidateSlug)) continue;
-    const windowStart = Math.max(0, wm.index - 450);
+    const windowStart = Math.max(0, wm.index - 500);
     const windowEnd = Math.min(normalizedText.length, wm.index + 900);
     const chunk = normalizedText.slice(windowStart, windowEnd);
 
     const titleM =
-      chunk.match(/"(?:title|name|alt)"\s*:\s*"([^"]{3,220})"/i) ||
+      chunk.match(/"(?:title|name|alt|vod_name)"\s*:\s*"([^"]{3,220})"/i) ||
       chunk.match(/<h[1-5][^>]*>([\s\S]*?)<\/h[1-5]>/i) ||
       chunk.match(/\balt=["']([^"']{3,200})["']/i);
     const thumbM =
       chunk.match(
-        /"(?:thumbnail|thumb|poster|image|cover|src)"\s*:\s*"(https?:\/\/[^"\s]+|\/[^"\s]+\.(?:jpg|jpeg|png|webp|avif)[^"\s]*)"/i
+        /"(?:thumbnail|thumb|poster|image|cover|pic|vod_pic|src)"\s*:\s*"(https?:\/\/[^"\s]+|\/[^"\s]+\.(?:jpg|jpeg|png|webp|avif)[^"\s]*)"/i
       ) ||
       chunk.match(
         /\bsrc=["'](https?:\/\/[^"'\s]+|\/[^"'\s]+\.(?:jpg|jpeg|png|webp|avif)[^"'\s]*)["']/i
@@ -2262,22 +2278,48 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
     );
   }
 
-  // 3. Dự phòng quét theo cặp `"id"` / `"code"` + `"title"`
-  if (items.length === 0) {
-    const cardRegex =
-      /"(?:id|_id|code|videoId)"\s*:\s*"([a-zA-Z0-9_-]{5,140})"[\s\S]{0,500}?"(?:title|name)"\s*:\s*"([^"]{3,220})"/gi;
-    let cm;
-    while ((cm = cardRegex.exec(normalizedText)) !== null) {
-      const cSlug = cm[1];
-      const cTitle = cm[2];
-      const chunk = normalizedText.slice(
-        Math.max(0, cm.index - 300),
-        Math.min(normalizedText.length, cm.index + 700)
-      );
-      const thumbM = chunk.match(
-        /"(?:thumbnail|thumb|poster|image|cover|src)"\s*:\s*"([^"]{5,400})"/i
-      );
-      registerCandidate(cSlug, cTitle, thumbM ? thumbM[1] : "");
+  // 3. Quét các object có chứa `"slug":"..."` VÀ CÓ ẢNH THUMBNAIL THẬT (loại bỏ hoàn toàn các object chỉ có chữ như "Win big with DeFi")
+  const slugKeyRegex = /"slug"\s*:\s*"([a-zA-Z0-9_-]{5,140})"/g;
+  let sm;
+  while ((sm = slugKeyRegex.exec(normalizedText)) !== null) {
+    const candidateSlug = sm[1];
+    if (seen.has(candidateSlug)) continue;
+
+    // Khoanh vùng 1 object đơn lẻ xung quanh vị trí "slug"
+    const openBrace = normalizedText.lastIndexOf("{", sm.index);
+    const closeBrace = normalizedText.indexOf("}", sm.index);
+    const objSlice =
+      openBrace !== -1 &&
+      closeBrace !== -1 &&
+      closeBrace - openBrace < 1500
+        ? normalizedText.slice(openBrace, closeBrace + 1)
+        : normalizedText.slice(
+            Math.max(0, sm.index - 350),
+            Math.min(normalizedText.length, sm.index + 650)
+          );
+
+    const titleM = objSlice.match(
+      /"(?:title|name|vod_name)"\s*:\s*"([^"]{3,220})"/i
+    );
+    const thumbM = objSlice.match(
+      /"(?:thumbnail|thumb|poster|image|cover|pic|vod_pic|posterUrl|thumbUrl)"\s*:\s*"([^"]{5,400})"/i
+    );
+    const viewsM = objSlice.match(
+      /"(?:views|view|viewCount)"\s*:\s*"?(\d[\d,.]*[kKmM]?)"?/i
+    );
+    const likesM = objSlice.match(
+      /"(?:likes|like|likeCount)"\s*:\s*"?(\d[\d,.]*[kKmM]?)"?/i
+    );
+    const durM = objSlice.match(
+      /"(?:duration|time|length)"\s*:\s*"([^"]{1,20})"/i
+    );
+
+    if (titleM && thumbM) {
+      registerCandidate(candidateSlug, titleM[1], thumbM[1], {
+        views: viewsM ? viewsM[1] : "0",
+        likes: likesM ? likesM[1] : "0",
+        duration: durM ? durM[1] : ""
+      });
     }
   }
 
@@ -2289,22 +2331,34 @@ async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
     ...BROWSER_HEADERS,
     Referer: `${QMH_DOMAIN}/`
   };
+  const rscHeaders = {
+    ...qmhHeaders,
+    RSC: "1"
+  };
 
-  const htmlUrl = q
-    ? `${QMH_DOMAIN}/?tab=casino&category=movie&q=${encodeURIComponent(q)}&page=${page}`
-    : `${QMH_DOMAIN}/?tab=casino&category=movie&page=${page}`;
-  const altHtmlUrl = `${QMH_DOMAIN}/?category=movie&page=${page}`;
+  // Gọi đồng thời:
+  // 1. API JSON của qmhv3.top
+  // 2. Trang ?tab=movie kèm RSC: 1
+  // 3. Trang ?tab=casino&category=movie
+  // 4. Trang xem video mẫu `/watch/yylive-tracky2k-10112026` (nơi luôn có sẵn danh sách video đề xuất thật!)
   const apiUrl = `${QMH_DOMAIN}/api/videos?category=movie&page=${page}&sort=${sortBy}${
     q ? `&q=${encodeURIComponent(q)}` : ""
   }`;
+  const movieTabUrl = q
+    ? `${QMH_DOMAIN}/?tab=movie&category=movie&q=${encodeURIComponent(q)}&page=${page}`
+    : `${QMH_DOMAIN}/?tab=movie&category=movie&page=${page}`;
+  const hybridTabUrl = `${QMH_DOMAIN}/?tab=casino&category=movie&page=${page}`;
+  const seedWatchUrl = `${QMH_DOMAIN}/watch/yylive-tracky2k-10112026`;
 
-  const [htmlRes, altHtmlRes, apiRes] = await Promise.all([
-    fetchFastText(htmlUrl, qmhHeaders, 4500),
-    fetchFastText(altHtmlUrl, qmhHeaders, 4500),
-    fetchFastText(apiUrl, qmhHeaders, 4000)
+  const [apiRes, rscMovieRes, htmlMovieRes, seedWatchRes] = await Promise.all([
+    fetchFastText(apiUrl, qmhHeaders, 4000),
+    fetchFastText(movieTabUrl, rscHeaders, 4000),
+    fetchFastText(hybridTabUrl, qmhHeaders, 4000),
+    fetchFastText(seedWatchUrl, qmhHeaders, 4000)
   ]);
 
-  if (apiRes.text && apiRes.text.length > 200) {
+  // 1. Kiểm tra API JSON nếu có danh sách phim
+  if (apiRes.text && apiRes.text.length > 150) {
     const normalized = normalizeQmhJsonItems(apiRes.text, QMH_DOMAIN);
     if (normalized && normalized.items.length > 0) {
       return {
@@ -2317,43 +2371,61 @@ async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
     }
   }
 
-  const primaryHtml =
-    htmlRes.text.length >= altHtmlRes.text.length
-      ? htmlRes.text
-      : altHtmlRes.text;
+  // 2. Gom và phân tích từ tất cả các luồng HTML / RSC trả về
+  const combinedMap = new Map();
+  const sourcesToParse = [
+    rscMovieRes.text,
+    htmlMovieRes.text,
+    seedWatchRes.text
+  ];
 
-  if (primaryHtml) {
-    const parsedFromHtml = parseQmhListFromHtml(primaryHtml, QMH_DOMAIN);
-    if (parsedFromHtml.length > 0) {
-      const totalPages = Math.max(
-        page + 5,
-        extractTotalPagesFromHtml(primaryHtml, page, false)
-      );
-      return {
-        items: sortVideoItems(parsedFromHtml, sortBy),
-        page,
-        totalPages,
-        total: totalPages * parsedFromHtml.length,
-        categories: []
-      };
+  for (const srcText of sourcesToParse) {
+    if (!srcText) continue;
+    const extracted = parseQmhListFromHtml(srcText, QMH_DOMAIN);
+    for (const item of extracted) {
+      if (!combinedMap.has(item.slug)) {
+        combinedMap.set(item.slug, item);
+      }
     }
   }
 
-  let sampleData = "";
-  if (primaryHtml) {
-    const unesc = primaryHtml.replace(/\\"/g, '"').replace(/\\\//g, "/");
-    const watchIdx = unesc.indexOf("watch");
-    const movieIdx = unesc.indexOf("movie");
-    const bodyIdx = unesc.indexOf("<body");
-    const pivot =
-      watchIdx !== -1
-        ? watchIdx
-        : movieIdx !== -1
-        ? movieIdx
-        : bodyIdx !== -1
-        ? bodyIdx
-        : Math.floor(unesc.length * 0.5);
-    sampleData = unesc.slice(Math.max(0, pivot - 200), pivot + 800);
+  // 3. Nếu trong HTML có link tới file JS bundle `/_next/static/chunks/app/page-*.js`, tự động quét nhanh file JS đó để tìm endpoint API thật của kho phim
+  const sampleHtml = htmlMovieRes.text || rscMovieRes.text || "";
+  if (combinedMap.size === 0 && sampleHtml) {
+    const chunkMatch = sampleHtml.match(
+      /(\/_next\/static\/chunks\/app\/page-[a-zA-Z0-9_-]+\.js)/i
+    );
+    if (chunkMatch && chunkMatch[1]) {
+      const chunkUrl = `${QMH_DOMAIN}${chunkMatch[1]}`;
+      const { text: jsBundle } = await fetchFastText(
+        chunkUrl,
+        qmhHeaders,
+        3500
+      );
+      if (jsBundle) {
+        const jsExtracted = parseQmhListFromHtml(jsBundle, QMH_DOMAIN);
+        for (const item of jsExtracted) {
+          if (!combinedMap.has(item.slug)) {
+            combinedMap.set(item.slug, item);
+          }
+        }
+      }
+    }
+  }
+
+  const finalItems = sortVideoItems([...combinedMap.values()], sortBy);
+  if (finalItems.length > 0) {
+    const totalPages = Math.max(
+      page + 5,
+      extractTotalPagesFromHtml(sampleHtml, page, false)
+    );
+    return {
+      items: finalItems,
+      page,
+      totalPages,
+      total: totalPages * finalItems.length,
+      categories: []
+    };
   }
 
   return {
@@ -2364,11 +2436,13 @@ async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
     categories: [],
     _debug: {
       apiVia: apiRes.via,
-      apiLen: apiRes.text.length,
-      apiPreview: apiRes.text.slice(0, 120),
-      htmlVia: htmlRes.via,
-      htmlLen: primaryHtml.length,
-      dataSampleAroundMovieOrWatch: sampleData
+      apiPreview: apiRes.text.slice(0, 200),
+      rscLen: rscMovieRes.text.length,
+      htmlLen: htmlMovieRes.text.length,
+      seedWatchLen: seedWatchRes.text.length,
+      seedWatchPreview: seedWatchRes.text
+        ? seedWatchRes.text.replace(/\\"/g, '"').slice(0, 400)
+        : ""
     }
   };
 }
