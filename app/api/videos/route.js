@@ -2787,11 +2787,8 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
       const streamType = lower.includes(".mp4") ? "mp4" : "hls";
       allStreams.push(mediaUrl);
 
-      // 1. Luồng Proxy Toàn Phần (Bắt buộc cho api.qmhv3.top để vượt chặn Origin/Referer trên từng segment)
       const fullProxyUrl = `/api/videos?rawProxy=1&proxySegments=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
-      // 2. Trình phát Iframe Độc lập (Tự động xử lý Hls.js + Fallback đa luồng ngay trong iframe nếu trình phát chính của web bị kẹt)
       const standalonePlayerUrl = `/api/videos?qmhPlayerProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}`;
-      // 3. Luồng Proxy Nhẹ (Chỉ proxy playlist .m3u8)
       const lightProxyUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
 
       customSources.push({
@@ -2968,9 +2965,14 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
 }
 
 // =====================================================================
-// HÀM PROXY LUỒNG DỮ LIỆU / HLS (.m3u8 / .ts / AJAX) CHUẨN PC & MOBILE
+// HÀM PROXY LUỒNG DỮ LIỆU / HLS (.m3u8 / KEY AES-128 / .ts) FIX KEYLOADERROR 403
 // =====================================================================
-function rewriteM3u8Manifest(m3u8Text, basePlaylistUrl, buildProxyUrl, proxySegments) {
+function rewriteM3u8Manifest(
+  m3u8Text,
+  basePlaylistUrl,
+  buildProxyUrl,
+  proxySegments
+) {
   return m3u8Text
     .split(/\r?\n/)
     .map((line) => {
@@ -2978,10 +2980,12 @@ function rewriteM3u8Manifest(m3u8Text, basePlaylistUrl, buildProxyUrl, proxySegm
       if (!trimmed) return line;
       if (trimmed.startsWith("#")) {
         return line.replace(/URI=["']([^"']+)["']/gi, (_, uri) => {
-          if (uri.includes("/api/videos?")) return `URI="${uri}"`;
+          if (uri.startsWith("data:") || uri.includes("/api/videos?")) {
+            return `URI="${uri}"`;
+          }
           try {
             const abs = new URL(uri, basePlaylistUrl).toString();
-            return `URI="${buildProxyUrl(abs, true)}"`;
+            return `URI="${buildProxyUrl(abs, true, true)}"`;
           } catch (_) {
             return `URI="${uri}"`;
           }
@@ -2998,7 +3002,7 @@ function rewriteM3u8Manifest(m3u8Text, basePlaylistUrl, buildProxyUrl, proxySegm
           lowerAbs.includes("/index");
 
         if (isSubPlaylist || proxySegments || abs.includes("qmhv3.top")) {
-          return buildProxyUrl(abs, true);
+          return buildProxyUrl(abs, true, false);
         }
         return abs;
       } catch (_) {
@@ -3008,12 +3012,103 @@ function rewriteM3u8Manifest(m3u8Text, basePlaylistUrl, buildProxyUrl, proxySegm
     .join("\n");
 }
 
+async function fetchBinaryWithProxyFallback(
+  targetUrl,
+  headers,
+  timeoutMs = 6000
+) {
+  // 1. Thử gọi trực tiếp với bộ headers chuẩn của qmhv3.top
+  try {
+    const directRes = await fetchWithTimeout(targetUrl, { headers }, 4500);
+    if (directRes.ok || directRes.status === 206) {
+      const buf = await directRes.arrayBuffer();
+      if (buf && buf.byteLength > 0) {
+        return {
+          buffer: buf,
+          status: directRes.status,
+          contentType: directRes.headers.get("content-type") || "",
+          contentRange: directRes.headers.get("content-range") || ""
+        };
+      }
+    }
+  } catch (_) {}
+
+  // 2. Thử gọi qua các cổng Proxy hỗ trợ trả về raw binary
+  const binaryProxies = [
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`,
+    `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`
+  ];
+
+  for (const pUrl of binaryProxies) {
+    try {
+      const res = await fetchWithTimeout(
+        pUrl,
+        {
+          headers: {
+            "User-Agent": BROWSER_HEADERS["User-Agent"],
+            Accept: "*/*"
+          }
+        },
+        timeoutMs
+      );
+      if (res.ok) {
+        const buf = await res.arrayBuffer();
+        if (buf && buf.byteLength > 0) {
+          const headStr = Buffer.from(buf.slice(0, 15))
+            .toString("utf-8")
+            .toLowerCase();
+          if (!headStr.startsWith("<!doctype") && !headStr.startsWith("<html")) {
+            return {
+              buffer: buf,
+              status: 200,
+              contentType: res.headers.get("content-type") || "",
+              contentRange: ""
+            };
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 3. Dự phòng cuối cho Key 16-byte qua allorigins /get
+  try {
+    const aoJsonUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+    const res = await fetchWithTimeout(aoJsonUrl, {}, 5000);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data.contents === "string") {
+        if (data.contents.startsWith("data:")) {
+          const b64Part = data.contents.split(",")[1] || "";
+          const buf = Buffer.from(b64Part, "base64");
+          if (buf.byteLength > 0) {
+            return {
+              buffer: buf.buffer.slice(
+                buf.byteOffset,
+                buf.byteOffset + buf.byteLength
+              ),
+              status: 200,
+              contentType: "application/octet-stream",
+              contentRange: ""
+            };
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  return null;
+}
+
 async function handleRawProxy(req) {
   const sp = req.nextUrl.searchParams;
   const targetUrl = sp.get("url");
   const referer = sp.get("referer") || `${DEFAULT_DOMAIN}/`;
   const cookie = sp.get("cookie") || "";
   const proxySegments = sp.get("proxySegments") === "1";
+  const isKeyRequest =
+    sp.get("isKey") === "1" ||
+    /\.(?:key|bin)(?:\?|$)|\/key(?:\?|$|\/)/i.test(targetUrl || "");
 
   if (!targetUrl) {
     return new NextResponse("Missing url", { status: 400, headers: CORS });
@@ -3031,7 +3126,9 @@ async function handleRawProxy(req) {
     const effectiveReferer = isQmhTarget ? `${QMH_DOMAIN}/` : referer;
     const method = (req.method || "GET").toUpperCase();
     const isMediaStream =
-      /\.(?:m3u8|ts|mp4|webm|m4s)(?:\?|$)|\/hls\//i.test(targetUrl);
+      isKeyRequest ||
+      isQmhTarget ||
+      /\.(?:m3u8|ts|mp4|webm|m4s|key)(?:\?|$)|\/hls\//i.test(targetUrl);
 
     const headers = {
       "User-Agent": BROWSER_HEADERS["User-Agent"],
@@ -3057,16 +3154,43 @@ async function handleRawProxy(req) {
     }
 
     const rangeHeader = req.headers.get("range");
-    if (rangeHeader) headers["Range"] = rangeHeader;
+    if (rangeHeader && !isKeyRequest) headers["Range"] = rangeHeader;
 
     if (cookie) headers["Cookie"] = cookie;
 
-    const fetchOpts = { method, headers };
-    if (method !== "GET" && method !== "HEAD") {
-      const bodyBuf = await req.arrayBuffer();
-      if (bodyBuf && bodyBuf.byteLength > 0) {
-        fetchOpts.body = bodyBuf;
+    const selfOrigin = req.nextUrl.origin;
+    const buildProxyUrl = (absUrl, forceSegFlag = false, isKey = false) =>
+      `${selfOrigin}/api/videos?rawProxy=1${
+        forceSegFlag || proxySegments ? "&proxySegments=1" : ""
+      }${isKey ? "&isKey=1" : ""}&url=${encodeURIComponent(
+        absUrl
+      )}&referer=${encodeURIComponent(effectiveReferer)}${
+        cookie ? `&cookie=${encodeURIComponent(cookie)}` : ""
+      }`;
+
+    // ===============================================================
+    // NHÁNH 1: XỬ LÝ ĐẶC BIỆT CHO KHÓA GIẢI MÃ AES-128 (FIX keyLoadError 403)
+    // ===============================================================
+    if (isKeyRequest) {
+      const keyResult = await fetchBinaryWithProxyFallback(
+        targetUrl,
+        headers,
+        6000
+      );
+      if (keyResult && keyResult.buffer) {
+        return new NextResponse(keyResult.buffer, {
+          status: 200,
+          headers: {
+            ...CORS,
+            "Content-Type": "application/octet-stream",
+            "Cache-Control": "public, max-age=3600"
+          }
+        });
       }
+      return new NextResponse("Key fetch failed", {
+        status: 502,
+        headers: CORS
+      });
     }
 
     const lowerTarget = targetUrl.toLowerCase().split("?")[0];
@@ -3075,50 +3199,27 @@ async function handleRawProxy(req) {
       lowerTarget.includes("/playlist") ||
       lowerTarget.includes("/master");
 
-    const selfOrigin = req.nextUrl.origin;
-    const buildProxyUrl = (absUrl, forceSegFlag = false) =>
-      `${selfOrigin}/api/videos?rawProxy=1${
-        forceSegFlag || proxySegments ? "&proxySegments=1" : ""
-      }&url=${encodeURIComponent(absUrl)}&referer=${encodeURIComponent(
-        effectiveReferer
-      )}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ""}`;
-
-    let upstream = null;
-    try {
-      upstream = await fetchWithTimeout(targetUrl, fetchOpts, 6500);
-    } catch (_) {}
-
-    // Nếu gọi trực tiếp từ Vercel bị 403/401, thử bỏ Origin/Referer
-    if (upstream && (upstream.status === 403 || upstream.status === 401)) {
-      try {
-        const bareHeaders = {
-          "User-Agent": BROWSER_HEADERS["User-Agent"],
-          Accept: "*/*"
-        };
-        if (rangeHeader) bareHeaders["Range"] = rangeHeader;
-        const retryRes = await fetchWithTimeout(
-          targetUrl,
-          { method, headers: bareHeaders },
-          5000
-        );
-        if (retryRes.ok || retryRes.status === 206) {
-          upstream = retryRes;
-        }
-      } catch (_) {}
-    }
-
-    // Nếu là playlist .m3u8 và IP Vercel bị chặn bởi Cloudflare trên api.qmhv3.top, tự động lấy qua fetchFastText (codetabs / allorigins)
+    // ===============================================================
+    // NHÁNH 2: XỬ LÝ PLAYLIST .M3U8 (TỰ ĐỘNG NHÚNG KEY BASE64 TRỰC TIẾP VÀO M3U8!)
+    // ===============================================================
     if (isExplicitM3u8) {
       let m3u8Content = "";
       let finalPlaylistUrl = targetUrl;
 
-      if (upstream && upstream.ok) {
-        finalPlaylistUrl = upstream.url || targetUrl;
-        const txt = await upstream.text();
-        if (txt && txt.trim().startsWith("#EXTM3U")) {
-          m3u8Content = txt;
+      try {
+        const directRes = await fetchWithTimeout(
+          targetUrl,
+          { method, headers },
+          5000
+        );
+        if (directRes.ok) {
+          finalPlaylistUrl = directRes.url || targetUrl;
+          const txt = await directRes.text();
+          if (txt && txt.trim().startsWith("#EXTM3U")) {
+            m3u8Content = txt;
+          }
         }
-      }
+      } catch (_) {}
 
       if (!m3u8Content) {
         const fallback = await fetchFastText(targetUrl, headers, 5000);
@@ -3128,6 +3229,44 @@ async function handleRawProxy(req) {
       }
 
       if (m3u8Content) {
+        // Tự động tải trước Key 16-byte ngay trên server và nhúng thẳng thành data:application/octet-stream;base64,...
+        const keyUriMatches = [
+          ...m3u8Content.matchAll(/#EXT-X-KEY[^\r\n]*URI=["']([^"']+)["']/gi)
+        ];
+        if (keyUriMatches.length > 0) {
+          const uniqueRawUris = [
+            ...new Set(keyUriMatches.map((m) => m[1]).filter(Boolean))
+          ];
+          await Promise.all(
+            uniqueRawUris.map(async (rawKeyUri) => {
+              try {
+                const absKeyUrl = new URL(
+                  rawKeyUri,
+                  finalPlaylistUrl
+                ).toString();
+                const keyRes = await fetchBinaryWithProxyFallback(
+                  absKeyUrl,
+                  headers,
+                  4500
+                );
+                if (
+                  keyRes &&
+                  keyRes.buffer &&
+                  keyRes.buffer.byteLength === 16
+                ) {
+                  const b64Key = Buffer.from(keyRes.buffer).toString("base64");
+                  const dataUri = `data:application/octet-stream;base64,${b64Key}`;
+                  m3u8Content = m3u8Content
+                    .split(`"${rawKeyUri}"`)
+                    .join(`"${dataUri}"`)
+                    .split(`'${rawKeyUri}'`)
+                    .join(`'${dataUri}'`);
+                }
+              } catch (_) {}
+            })
+          );
+        }
+
         const rewritten = rewriteM3u8Manifest(
           m3u8Content,
           finalPlaylistUrl,
@@ -3145,15 +3284,45 @@ async function handleRawProxy(req) {
       }
     }
 
-    // Nếu là segment (.ts / .m4s / segment của api.qmhv3.top) mà Vercel bị chặn 403, fallback qua proxy trung gian
-    if ((!upstream || (!upstream.ok && upstream.status !== 206)) && isMediaStream) {
-      try {
-        const proxySegUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`;
-        const segFallback = await fetchWithTimeout(proxySegUrl, {}, 6500);
-        if (segFallback.ok) {
-          upstream = segFallback;
+    // ===============================================================
+    // NHÁNH 3: XỬ LÝ CÁC PHÂN ĐOẠN VIDEO (.TS / .M4S / .MP4)
+    // ===============================================================
+    const fetchOpts = { method, headers };
+    if (method !== "GET" && method !== "HEAD") {
+      const bodyBuf = await req.arrayBuffer();
+      if (bodyBuf && bodyBuf.byteLength > 0) {
+        fetchOpts.body = bodyBuf;
+      }
+    }
+
+    let upstream = null;
+    try {
+      upstream = await fetchWithTimeout(targetUrl, fetchOpts, 6500);
+    } catch (_) {}
+
+    if (!upstream || (!upstream.ok && upstream.status !== 206)) {
+      const binFallback = await fetchBinaryWithProxyFallback(
+        targetUrl,
+        headers,
+        6500
+      );
+      if (binFallback && binFallback.buffer) {
+        let outType = binFallback.contentType || "video/mp2t";
+        if (
+          lowerTarget.endsWith(".ts") ||
+          (isQmhTarget && !lowerTarget.endsWith(".mp4"))
+        ) {
+          outType = "video/mp2t";
         }
-      } catch (_) {}
+        return new NextResponse(binFallback.buffer, {
+          status: binFallback.status || 200,
+          headers: {
+            ...CORS,
+            "Content-Type": outType,
+            "Cache-Control": "public, max-age=3600"
+          }
+        });
+      }
     }
 
     if (!upstream) {
@@ -3168,13 +3337,11 @@ async function handleRawProxy(req) {
       upstream.headers.get("content-type") || ""
     ).toLowerCase();
 
-    // Chỉ kiểm tra .m3u8 khi Content-Type thực sự là mpegurl/text, KHÔNG dùng contentLength < 120000 để tránh làm hỏng các segment .ts nhỏ trên máy tính!
     const isPlaylistResponse =
       contentType.includes("mpegurl") ||
       (contentType.includes("text/") && !lowerTarget.endsWith(".ts"));
 
     if (!isPlaylistResponse && upstream.body) {
-      // Ép kiểu Content-Type chuẩn cho segment video để Hls.js trên máy tính không báo lỗi giải mã
       let outContentType = upstream.headers.get("content-type") || "video/mp2t";
       if (
         lowerTarget.endsWith(".ts") ||
@@ -3285,7 +3452,7 @@ export async function GET(req) {
     return handleRawProxy(req);
   }
 
-  // Trình phát Iframe Dự Phòng Độc Lập cho QMH (Tự động xoay vòng Proxy -> Direct không Referer -> Direct)
+  // Trình phát Iframe Dự Phòng Độc Lập cho QMH
   if (sp.get("qmhPlayerProxy") === "1") {
     const targetUrl = sp.get("url") || "";
     const referer = sp.get("referer") || `${QMH_DOMAIN}/`;
@@ -3324,7 +3491,7 @@ export async function GET(req) {
         }
         if (window.Hls && Hls.isSupported()) {
           hls = new Hls({
-            enableWorker: true,
+            enableWorker: false,
             lowLatencyMode: false,
             manifestLoadingTimeOut: 10000,
             manifestLoadingMaxRetry: 2,
@@ -4085,7 +4252,7 @@ export async function GET(req) {
           videoType: primaryType,
           streams,
           iframes,
-          sources: customSources,
+          sources: uniqueSources,
           _debug: debugInfo
         },
         { status: 200, headers: CORS }
