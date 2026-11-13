@@ -2565,12 +2565,17 @@ function extractQmhVideoStreamsFromHtml(rawHtml = "", realSlug = "") {
       .replace(/^['"]+|['"]+$/g, "")
       .replace(/\\+/g, "");
 
-    if (u.includes("url=")) {
+    // Nếu link nằm trong wrapper proxy của qmhv3 (ví dụ /api/proxy?url=... hoặc /embed?url=...) thì bóc URL thật ra
+    if (u.includes("url=") || u.includes("src=")) {
       try {
         const parsed = new URL(u, QMH_DOMAIN);
         const inner =
-          parsed.searchParams.get("url") || parsed.searchParams.get("src");
-        if (inner && inner.startsWith("http")) u = inner;
+          parsed.searchParams.get("url") ||
+          parsed.searchParams.get("src") ||
+          parsed.searchParams.get("file");
+        if (inner && /^https?:\/\//i.test(inner)) {
+          u = inner;
+        }
       } catch (_) {}
     }
 
@@ -2583,10 +2588,10 @@ function extractQmhVideoStreamsFromHtml(rawHtml = "", realSlug = "") {
     const lower = u.toLowerCase();
     if (IGNORE_DOMAINS.some((d) => lower.includes(d))) return;
 
-    // Chặn tuyệt đối các link điều hướng / trang watch / API nội bộ của qmhv3 bị nhận nhầm thành iframe!
+    // Chặn các link điều hướng hoặc preview ngắn không phải luồng chính
     if (
-      lower.includes(`/watch/`) ||
-      lower.includes(`/api/videos`) ||
+      lower.includes("/watch/") ||
+      lower.includes("/api/videos") ||
       lower === `${QMH_DOMAIN.toLowerCase()}` ||
       lower === `${QMH_DOMAIN.toLowerCase()}/` ||
       lower.includes("/?tab=") ||
@@ -2594,7 +2599,9 @@ function extractQmhVideoStreamsFromHtml(rawHtml = "", realSlug = "") {
       lower.includes("t.me/") ||
       lower.includes("telegram") ||
       lower.includes("/login") ||
-      lower.includes("/register")
+      lower.includes("/register") ||
+      lower.includes("preview") ||
+      lower.includes("trailer")
     ) {
       return;
     }
@@ -2622,7 +2629,6 @@ function extractQmhVideoStreamsFromHtml(rawHtml = "", realSlug = "") {
       return;
     }
 
-    // Chỉ nhận là iframe nếu thực sự là link nhúng player (/embed/, /player/, hoặc host lưu trữ video)
     const isKnownEmbed =
       DIRECT_IFRAME_HOSTS.some((h) => lower.includes(h)) ||
       PROXY_PREFERRED_HOSTS.filter((h) => h !== "qmhv3").some((h) =>
@@ -2636,63 +2642,34 @@ function extractQmhVideoStreamsFromHtml(rawHtml = "", realSlug = "") {
     }
   };
 
-  // 1. Quét ưu tiên vùng JSON/RSC quanh slug của video đang mở trước (để lấy đúng link stream của video đó)
-  const slugIdx = text.indexOf(realSlug);
-  const scopes =
-    slugIdx !== -1
-      ? [
-          text.slice(
-            Math.max(0, slugIdx - 1500),
-            Math.min(text.length, slugIdx + 4500)
-          ),
-          text
-        ]
-      : [text];
+  // 1. Khoanh vùng chính xác object chứa realSlug trước (cắt dừng ngay nếu gặp "slug" của video đề xuất tiếp theo)
+  const slugPattern = `"${realSlug}"`;
+  let primaryScope = "";
+  let searchPos = 0;
+
+  while (true) {
+    const idx = text.indexOf(slugPattern, searchPos);
+    if (idx === -1) break;
+    searchPos = idx + slugPattern.length;
+
+    const start = Math.max(0, idx - 600);
+    const afterChunk = text.slice(idx, Math.min(text.length, idx + 3500));
+    const nextSlugRel = afterChunk.slice(slugPattern.length).search(/"slug"\s*:/);
+    const end =
+      nextSlugRel !== -1
+        ? idx + slugPattern.length + nextSlugRel
+        : Math.min(text.length, idx + 3500);
+
+    primaryScope += "\n" + text.slice(start, end);
+  }
+
+  const scopes = primaryScope ? [primaryScope, text] : [text];
 
   for (const scope of scopes) {
-    // Quét trực tiếp mọi URL .m3u8 và .mp4
-    const directStreamRegex =
-      /https?:\/\/[^\s"'<>\\`]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\`]*)?/gi;
-    let m;
-    while ((m = directStreamRegex.exec(scope)) !== null) {
-      addCandidate(
-        m[0],
-        m[0].toLowerCase().includes(".mp4") ? "mp4" : "hls"
-      );
-    }
-
-    // Quét các trường JSON/RSC chứa link stream hoặc player
-    const fieldRegex =
-      /"(?:videoUrl|video_url|streamUrl|stream_url|playUrl|play_url|hlsUrl|hls_url|m3u8Url|m3u8_url|mp4Url|mp4_url|file|source|videoSource|securedLink|contentUrl|embedUrl|embed_url|iframeUrl|iframe_url|src)"\s*:\s*"(https?:\/\/[^"\s]+|\/[^"\s]+)"/gi;
-    while ((m = fieldRegex.exec(scope)) !== null) {
-      const key = m[0].split(":")[0].toLowerCase();
-      const val = m[1];
-      if (isStaticAsset(val)) continue;
-      if (key.includes("embed") || key.includes("iframe")) {
-        addCandidate(val, "iframe");
-      } else if (
-        key.includes("hls") ||
-        key.includes("m3u8") ||
-        key.includes("stream") ||
-        key.includes("play") ||
-        key.includes("video")
-      ) {
-        addCandidate(
-          val,
-          val.toLowerCase().includes(".mp4")
-            ? "mp4"
-            : val.toLowerCase().includes(".m3u8")
-            ? "hls"
-            : ""
-        );
-      } else {
-        addCandidate(val);
-      }
-    }
-
-    // Quét thẻ <video>, <source>, <iframe> thật sự trong DOM
+    // Ưu tiên 1: Thẻ <video>, <source>, <iframe> trong DOM
     const mediaTagRegex =
       /<(video|source|iframe)\b[^>]*?\b(?:src|data-src)=["']([^"']+)["'][^>]*>/gi;
+    let m;
     while ((m = mediaTagRegex.exec(scope)) !== null) {
       const tag = m[1].toLowerCase();
       const src = m[2];
@@ -2704,6 +2681,50 @@ function extractQmhVideoStreamsFromHtml(rawHtml = "", realSlug = "") {
           src.toLowerCase().includes(".mp4") ? "mp4" : "hls"
         );
       }
+    }
+
+    // Ưu tiên 2: Các trường JSON/RSC chứa link stream/player của video
+    const fieldRegex =
+      /"(?:videoUrl|video_url|streamUrl|stream_url|playUrl|play_url|hlsUrl|hls_url|m3u8Url|m3u8_url|mp4Url|mp4_url|file|source|videoSource|securedLink|contentUrl|embedUrl|embed_url|iframeUrl|iframe_url|src|url)"\s*:\s*"(https?:\/\/[^"\s]+|\/[^"\s]+)"/gi;
+    while ((m = fieldRegex.exec(scope)) !== null) {
+      const key = m[0].split(":")[0].toLowerCase();
+      const val = m[1];
+      if (isStaticAsset(val)) continue;
+      if (key.includes("embed") || key.includes("iframe")) {
+        addCandidate(val, "iframe");
+      } else if (
+        key.includes("hls") ||
+        key.includes("m3u8") ||
+        key.includes("stream") ||
+        key.includes("play") ||
+        key.includes("video") ||
+        key.includes("file") ||
+        key.includes("source")
+      ) {
+        addCandidate(
+          val,
+          val.toLowerCase().includes(".mp4")
+            ? "mp4"
+            : val.toLowerCase().includes(".m3u8")
+            ? "hls"
+            : ""
+        );
+      }
+    }
+
+    // Ưu tiên 3: Quét trực tiếp URL .m3u8 / .mp4
+    const directStreamRegex =
+      /https?:\/\/[^\s"'<>\\`]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\`]*)?/gi;
+    while ((m = directStreamRegex.exec(scope)) !== null) {
+      addCandidate(
+        m[0],
+        m[0].toLowerCase().includes(".mp4") ? "mp4" : "hls"
+      );
+    }
+
+    // Nếu đã tìm thấy stream ngay trong vùng primaryScope của đúng video này thì dừng luôn, không quét tràn xuống danh sách video liên quan!
+    if (streams.length > 0 || iframes.length > 0) {
+      break;
     }
   }
 
@@ -2733,10 +2754,11 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
   const unwrapQmhMediaUrl = (rawUrl = "") => {
     if (!rawUrl) return "";
     let u = unescapeNextRscText(String(rawUrl).trim());
-    if (u.includes("url=")) {
+    if (u.includes("url=") || u.includes("src=")) {
       try {
         const parsed = new URL(u, QMH_DOMAIN);
-        const innerUrl = parsed.searchParams.get("url");
+        const innerUrl =
+          parsed.searchParams.get("url") || parsed.searchParams.get("src");
         if (innerUrl && innerUrl.startsWith("http")) {
           return innerUrl;
         }
@@ -2774,141 +2796,76 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
     if (isDirectMedia) {
       const streamType = lower.includes(".mp4") ? "mp4" : "hls";
       allStreams.push(mediaUrl);
-      const proxyStreamUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
 
-      // Đặt Server (Trực tiếp) và Server (VIP Proxy) cạnh nhau để tự động fallback mượt mà
-      customSources.push({
-        label: `${label} (VIP)`,
-        name: `${label} (VIP)`,
-        url: proxyStreamUrl,
-        src: proxyStreamUrl,
-        rawUrl: mediaUrl,
-        backupUrl: mediaUrl,
-        type: streamType,
-        priority: 1
-      });
+      // 1. Proxy nhẹ (Chỉ proxy playlist .m3u8, giữ nguyên link CDN cho các phân đoạn .ts giúp tải cực nhanh trên Vercel)
+      const fastProxyUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
+      // 2. Proxy toàn phần (Proxy cả file .ts trong trường hợp CDN khóa chặt Referer trên từng phân đoạn)
+      const fullProxyUrl = `/api/videos?rawProxy=1&proxySegments=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
+
+      // Đặt bản Trực tiếp lên #1 hoặc song song với VIP để nếu token .m3u8 khóa theo IP hoặc chặn IP Vercel thì trình duyệt phát thẳng luôn!
       customSources.push({
         label: `${label} (Trực tiếp)`,
         name: `${label} (Trực tiếp)`,
         url: mediaUrl,
         src: mediaUrl,
         rawUrl: mediaUrl,
-        backupUrl: proxyStreamUrl,
+        backupUrl: fastProxyUrl,
+        type: streamType,
+        priority: 1
+      });
+      customSources.push({
+        label: `${label} (VIP)`,
+        name: `${label} (VIP)`,
+        url: fastProxyUrl,
+        src: fastProxyUrl,
+        rawUrl: mediaUrl,
+        backupUrl: fullProxyUrl,
         type: streamType,
         priority: 2
+      });
+      customSources.push({
+        label: `${label} (VIP Proxy 2)`,
+        name: `${label} (VIP Proxy 2)`,
+        url: fullProxyUrl,
+        src: fullProxyUrl,
+        rawUrl: mediaUrl,
+        backupUrl: mediaUrl,
+        type: streamType,
+        priority: 3
       });
     } else {
       allIframes.push(mediaUrl);
       const proxyEmbedUrl = `/api/videos?embedProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}`;
-      const preferDirect = shouldUseDirectIframe(mediaUrl);
-      if (preferDirect) {
-        customSources.push({
-          label,
-          name: label,
-          url: mediaUrl,
-          src: mediaUrl,
-          backupUrl: proxyEmbedUrl,
-          type: "iframe",
-          priority: 3
-        });
-        customSources.push({
-          label: `${label} (Proxy)`,
-          name: `${label} (Proxy)`,
-          url: proxyEmbedUrl,
-          src: proxyEmbedUrl,
-          type: "iframe",
-          priority: 4
-        });
-      } else {
-        customSources.push({
-          label,
-          name: label,
-          url: proxyEmbedUrl,
-          src: proxyEmbedUrl,
-          backupUrl: mediaUrl,
-          type: "iframe",
-          priority: 3
-        });
-        customSources.push({
-          label: `${label} (Gốc)`,
-          name: `${label} (Gốc)`,
-          url: mediaUrl,
-          src: mediaUrl,
-          type: "iframe",
-          priority: 4
-        });
-      }
+      customSources.push({
+        label: `${label} (Embed)`,
+        name: `${label} (Embed)`,
+        url: mediaUrl,
+        src: mediaUrl,
+        backupUrl: proxyEmbedUrl,
+        type: "iframe",
+        priority: 4
+      });
+      customSources.push({
+        label: `${label} (Embed Proxy)`,
+        name: `${label} (Embed Proxy)`,
+        url: proxyEmbedUrl,
+        src: proxyEmbedUrl,
+        backupUrl: mediaUrl,
+        type: "iframe",
+        priority: 5
+      });
     }
   };
 
-  const [apiRes, apiDetailRes, htmlRes, rscRes] = await Promise.all([
-    fetchFastText(
-      `${QMH_DOMAIN}/api/videos?slug=${encodeURIComponent(realSlug)}`,
-      qmhHeaders,
-      4000
-    ),
-    fetchFastText(
-      `${QMH_DOMAIN}/api/videos/${encodeURIComponent(realSlug)}`,
-      qmhHeaders,
-      4000
-    ),
-    fetchFastText(postLink, qmhHeaders, 4500),
-    fetchFastText(postLink, rscHeaders, 4500)
+  // Chỉ gọi thẳng trang Watch HTML và RSC với timeout ngắn (3000ms) để trang mở ngay lập tức!
+  const [htmlRes, rscRes] = await Promise.all([
+    fetchFastText(postLink, qmhHeaders, 3200),
+    fetchFastText(postLink, rscHeaders, 3000)
   ]);
 
-  debugInfo.apiVia = apiRes.via;
   debugInfo.htmlVia = htmlRes.via;
   debugInfo.htmlLength = htmlRes.text.length;
-
-  for (const candidateApi of [apiRes.text, apiDetailRes.text]) {
-    if (candidateApi && candidateApi.trim().startsWith("{")) {
-      try {
-        const parsed = JSON.parse(candidateApi);
-        const vData = parsed?.data || parsed?.video || parsed;
-        if (vData && typeof vData === "object" && !vData.error) {
-          if (vData.title || vData.name) {
-            title = cleanText(vData.title || vData.name);
-          }
-          if (vData.thumbnail || vData.poster || vData.thumb) {
-            thumbnail =
-              normalizeQmhThumbUrl(
-                vData.thumbnail || vData.poster || vData.thumb,
-                QMH_DOMAIN
-              ) || thumbnail;
-          }
-          if (Array.isArray(vData.sources) && vData.sources.length > 0) {
-            vData.sources.forEach((s, i) => {
-              addQmhSource(
-                s.rawUrl || s.url || s.src || s.file,
-                s.type || "hls",
-                s.label || s.name || `Server #${i + 1}`
-              );
-            });
-          } else {
-            const directCandidate =
-              vData.hlsUrl ||
-              vData.m3u8Url ||
-              vData.playUrl ||
-              vData.streamUrl ||
-              vData.mp4Url ||
-              vData.videoUrl ||
-              vData.url ||
-              vData.src ||
-              vData.embedUrl ||
-              vData.iframe;
-            if (directCandidate) {
-              addQmhSource(
-                directCandidate,
-                vData.type ||
-                  (String(directCandidate).includes(".mp4") ? "mp4" : "hls"),
-                "Server #1"
-              );
-            }
-          }
-        }
-      } catch (_) {}
-    }
-  }
+  debugInfo.rscLength = rscRes.text.length;
 
   const combinedWatchText = `${htmlRes.text || ""}\n${rscRes.text || ""}`;
   if (combinedWatchText.trim()) {
@@ -2918,7 +2875,7 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
       cleanWatch.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
       cleanWatch.match(/"title"\s*:\s*"([^"]{3,220})"/i) ||
       cleanWatch.match(/<title>([\s\S]*?)<\/title>/i);
-    if (titleM && title === realSlug.replace(/-/g, " ")) {
+    if (titleM) {
       title = cleanText(titleM[1]).replace(/\s*[-|–]\s*QMH.*$/i, "");
     }
 
@@ -2929,7 +2886,7 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
       cleanWatch.match(
         /"(?:thumbnail|poster|thumb|cover)"\s*:\s*"(https?:\/\/[^"\s]+|\/[^"\s]+)"/i
       );
-    if (ogImg && ogImg[1] && thumbnail === FALLBACK_THUMB) {
+    if (ogImg && ogImg[1]) {
       thumbnail =
         normalizeQmhThumbUrl(ogImg[1], QMH_DOMAIN) || FALLBACK_THUMB;
     }
@@ -2937,24 +2894,37 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
     const { streams: foundStreams, iframes: foundIframes } =
       extractQmhVideoStreamsFromHtml(combinedWatchText, realSlug);
 
+    debugInfo.foundStreams = foundStreams;
+    debugInfo.foundIframes = foundIframes;
+
     let srvIndex = 1;
     for (const s of foundStreams) {
       addQmhSource(s.url, s.type, `Server #${srvIndex++}`);
     }
 
-    for (const ifr of foundIframes) {
-      const label = `Server #${srvIndex++}`;
-      const { directStreams } = await resolveEmbedPage(ifr.url, postLink);
-      for (const ds of directStreams) {
-        addQmhSource(
-          ds.url,
-          ds.type,
-          label,
-          ds.referer || ifr.url,
-          ds.embedCookies
-        );
+    // Giải mã song song các iframe (nếu có) để không phải chờ tuần tự
+    if (foundIframes.length > 0) {
+      const resolvedList = await Promise.all(
+        foundIframes.slice(0, 2).map((ifr) =>
+          resolveEmbedPage(ifr.url, postLink).then((res) => ({
+            ifr,
+            ...res
+          }))
+        )
+      );
+      for (const item of resolvedList) {
+        const label = `Server #${srvIndex++}`;
+        for (const ds of item.directStreams || []) {
+          addQmhSource(
+            ds.url,
+            ds.type,
+            label,
+            ds.referer || item.ifr.url,
+            ds.embedCookies
+          );
+        }
+        addQmhSource(item.ifr.url, "iframe", label);
       }
-      addQmhSource(ifr.url, "iframe", label);
     }
   }
 
@@ -2999,13 +2969,14 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
 }
 
 // =====================================================================
-// HÀM PROXY LUỒNG DỮ LIỆU / HLS (.m3u8 / .ts / AJAX)
+// HÀM PROXY LUỒNG DỮ LIỆU / HLS (.m3u8 / .ts / AJAX) SIÊU TỐC
 // =====================================================================
 async function handleRawProxy(req) {
   const sp = req.nextUrl.searchParams;
   const targetUrl = sp.get("url");
   const referer = sp.get("referer") || `${DEFAULT_DOMAIN}/`;
   const cookie = sp.get("cookie") || "";
+  const proxySegments = sp.get("proxySegments") === "1";
 
   if (!targetUrl) {
     return new NextResponse("Missing url", { status: 400, headers: CORS });
@@ -3018,18 +2989,18 @@ async function handleRawProxy(req) {
     } catch (_) {}
 
     const method = (req.method || "GET").toUpperCase();
+    const isMediaStream = /\.(?:m3u8|ts|mp4|webm|m4s)(?:\?|$)/i.test(targetUrl);
 
+    // Không gửi Origin lên CDN chứa .m3u8/.ts nếu không cần thiết để tránh lỗi CORS/403 từ CDN
     const headers = {
       ...BROWSER_HEADERS,
-      Origin: refOrigin,
-      Referer: referer
+      Referer: referer,
+      ...(!isMediaStream ? { Origin: refOrigin } : {})
     };
 
     const reqContentType = req.headers.get("content-type");
     if (reqContentType) headers["Content-Type"] = reqContentType;
 
-    // Không gắn X-Requested-With: XMLHttpRequest vào các luồng .m3u8/.ts/.mp4 để tránh bị CDN chặn
-    const isMediaStream = /\.(?:m3u8|ts|mp4|webm|m4s)(?:\?|$)/i.test(targetUrl);
     if (!isMediaStream && (method === "POST" || targetUrl.includes("/api/"))) {
       headers["X-Requested-With"] =
         req.headers.get("x-requested-with") || "XMLHttpRequest";
@@ -3048,37 +3019,45 @@ async function handleRawProxy(req) {
       }
     }
 
-    const upstream = await fetchWithTimeout(targetUrl, fetchOpts, 8500);
+    let upstream = await fetchWithTimeout(targetUrl, fetchOpts, 7000);
+
+    // Nếu CDN chặn Referer (trả về 403/401), tự động thử lại 1 lần không gửi Referer
+    if ((upstream.status === 403 || upstream.status === 401) && isMediaStream) {
+      const noRefHeaders = { ...BROWSER_HEADERS };
+      if (rangeHeader) noRefHeaders["Range"] = rangeHeader;
+      upstream = await fetchWithTimeout(
+        targetUrl,
+        { method, headers: noRefHeaders },
+        6000
+      );
+    }
+
     const finalTargetUrl = upstream.url || targetUrl;
     const contentType = (
       upstream.headers.get("content-type") || ""
     ).toLowerCase();
-    const contentLength = parseInt(
-      upstream.headers.get("content-length") || "0",
-      10
-    );
 
-    const mightBeM3u8 =
+    const isLikelyPlaylist =
       contentType.includes("mpegurl") ||
-      contentType.includes("text") ||
-      contentType.includes("json") ||
-      finalTargetUrl.includes(".m3u8") ||
-      finalTargetUrl.includes("playlist") ||
-      finalTargetUrl.includes("master") ||
-      finalTargetUrl.includes("/api/get-video") ||
-      (contentLength > 0 && contentLength < 120000);
+      finalTargetUrl.toLowerCase().includes(".m3u8") ||
+      finalTargetUrl.toLowerCase().includes("/playlist") ||
+      finalTargetUrl.toLowerCase().includes("/master");
 
-    if (!mightBeM3u8 && upstream.body) {
+    // Nếu là file video (.mp4 / .ts) nhị phân, stream thẳng body về trình duyệt ngay lập tức, KHÔNG đọc vào bộ nhớ đệm arrayBuffer!
+    if (!isLikelyPlaylist && upstream.body) {
       const streamHeaders = {
         ...CORS,
         "Content-Type":
-          upstream.headers.get("content-type") || "video/mp2t",
+          upstream.headers.get("content-type") ||
+          (finalTargetUrl.includes(".mp4") ? "video/mp4" : "video/mp2t"),
         "Cache-Control": "public, max-age=3600"
       };
       const contentRange = upstream.headers.get("content-range");
       if (contentRange) streamHeaders["Content-Range"] = contentRange;
       const acceptRanges = upstream.headers.get("accept-ranges");
       if (acceptRanges) streamHeaders["Accept-Ranges"] = acceptRanges;
+      const contentLen = upstream.headers.get("content-length");
+      if (contentLen) streamHeaders["Content-Length"] = contentLen;
 
       return new NextResponse(upstream.body, {
         status: upstream.status,
@@ -3096,10 +3075,12 @@ async function handleRawProxy(req) {
       contentType.includes("mpegurl") ||
       (finalTargetUrl.includes(".m3u8") && firstBytes.startsWith("#"))
     ) {
-      const buildProxyUrl = (absUrl) =>
-        `/api/videos?rawProxy=1&url=${encodeURIComponent(absUrl)}&referer=${encodeURIComponent(referer)}${
-          cookie ? `&cookie=${encodeURIComponent(cookie)}` : ""
-        }`;
+      const buildProxyUrl = (absUrl, keepSegFlag = false) =>
+        `/api/videos?rawProxy=1${
+          keepSegFlag && proxySegments ? "&proxySegments=1" : ""
+        }&url=${encodeURIComponent(absUrl)}&referer=${encodeURIComponent(
+          referer
+        )}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ""}`;
 
       const text = Buffer.from(buffer).toString("utf-8");
       const rewritten = text
@@ -3112,7 +3093,7 @@ async function handleRawProxy(req) {
               if (uri.includes("/api/videos?")) return `URI="${uri}"`;
               try {
                 const abs = new URL(uri, finalTargetUrl).toString();
-                return `URI="${buildProxyUrl(abs)}"`;
+                return `URI="${buildProxyUrl(abs, true)}"`;
               } catch (_) {
                 return `URI="${uri}"`;
               }
@@ -3121,7 +3102,18 @@ async function handleRawProxy(req) {
           if (trimmed.includes("/api/videos?")) return trimmed;
           try {
             const abs = new URL(trimmed, finalTargetUrl).toString();
-            return buildProxyUrl(abs);
+            const lowerAbs = abs.toLowerCase().split("?")[0];
+            const isSubPlaylist =
+              lowerAbs.endsWith(".m3u8") ||
+              lowerAbs.includes("/playlist") ||
+              lowerAbs.includes("/chunklist") ||
+              lowerAbs.includes("/index");
+
+            // Luôn proxy các sub-playlist (.m3u8), nhưng với các file .ts/.m4s thì trả thẳng link tuyệt đối của CDN (trừ khi bật proxySegments=1) để không làm nghẽn Vercel!
+            if (isSubPlaylist || proxySegments) {
+              return buildProxyUrl(abs, true);
+            }
+            return abs;
           } catch (_) {
             return line;
           }
