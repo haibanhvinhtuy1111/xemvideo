@@ -2,6 +2,179 @@
 
 import { useEffect, useRef, useState } from "react";
 
+// Helper tạo Loader chuẩn cho Hls.js v1.5.15 (Kế thừa đầy đủ this.stats và context của DefaultLoader)
+function createHybridFetchLoader(HlsClass) {
+  const DefaultLoader = HlsClass.DefaultConfig.loader;
+
+  return class HybridFetchLoader extends DefaultLoader {
+    constructor(config) {
+      super(config);
+      this.abortFlag = false;
+      this.abortController = null;
+    }
+
+    destroy() {
+      this.abortFlag = true;
+      if (this.abortController) {
+        try {
+          this.abortController.abort();
+        } catch (_) {}
+      }
+      super.destroy();
+    }
+
+    abort() {
+      this.abortFlag = true;
+      if (this.abortController) {
+        try {
+          this.abortController.abort();
+        } catch (_) {}
+      }
+      super.abort();
+    }
+
+    load(context, config, callbacks) {
+      const rawUrl = context.url || "";
+      const isBinary = context.responseType === "arraybuffer";
+
+      // Nếu là file .m3u8 (manifest / level), dùng DefaultLoader chuẩn của Hls.js
+      if (!isBinary) {
+        super.load(context, config, callbacks);
+        return;
+      }
+
+      // Bóc URL thật nếu đang nằm trong /api/videos?rawProxy=1&url=...
+      let targetUrl = rawUrl;
+      if (rawUrl.includes("/api/videos?") && rawUrl.includes("url=")) {
+        try {
+          const parsed = new URL(rawUrl, window.location.origin);
+          const inner = parsed.searchParams.get("url");
+          if (inner && /^https?:\/\//i.test(inner)) {
+            targetUrl = inner;
+          }
+        } catch (_) {}
+      }
+
+      const isKey =
+        targetUrl.includes("video-hls-key") ||
+        targetUrl.includes(".key") ||
+        rawUrl.includes("isKey=1") ||
+        Boolean(context.decryptdata && !context.frag);
+
+      const proxyEndpoint = `${
+        window.location.origin
+      }/api/videos?rawProxy=1&proxySegments=1${
+        isKey ? "&isKey=1" : ""
+      }&url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(
+        "https://qmhv3.top/"
+      )}`;
+
+      const startTime = performance.now();
+      this.stats.loading.start = startTime;
+      this.abortFlag = false;
+      this.abortController = new AbortController();
+      const signal = this.abortController.signal;
+
+      const fetchWithTimeoutClient = async (u, opts = {}, ms = 4500) => {
+        const timer = setTimeout(() => {
+          try {
+            if (!signal.aborted) this.abortController.abort();
+          } catch (_) {}
+        }, ms);
+        try {
+          const r = await fetch(u, { ...opts, signal });
+          if (!r.ok && r.status !== 206) {
+            throw new Error(`HTTP_${r.status}`);
+          }
+          const buf = await r.arrayBuffer();
+          if (!buf || buf.byteLength === 0) {
+            throw new Error("EMPTY");
+          }
+          // Nếu là Key AES-128, đảm bảo đúng 16 bytes (không nhận nhầm trang HTML lỗi)
+          if (isKey && buf.byteLength !== 16) {
+            throw new Error(`BAD_KEY_LEN_${buf.byteLength}`);
+          }
+          return buf;
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+
+      const runLoad = async () => {
+        // BƯỚC 1: Luôn thử gọi trực tiếp từ trình duyệt của người dùng với referrerPolicy: "no-referrer" trước!
+        // (Vì ở Ảnh 3, trình duyệt của bạn gọi trực tiếp tới api.qmhv3.top/api/v1/upload/video-hls-key đã thành công ngay lập tức!)
+        try {
+          const directBuf = await fetchWithTimeoutClient(
+            targetUrl,
+            {
+              referrerPolicy: "no-referrer",
+              mode: "cors",
+              credentials: "omit",
+              cache: "no-store"
+            },
+            4000
+          );
+          return directBuf;
+        } catch (_) {}
+
+        // BƯỚC 2: Thử gọi trực tiếp có Referer mặc định (nếu CDN cho phép CORS *)
+        try {
+          const normalBuf = await fetchWithTimeoutClient(
+            targetUrl,
+            {
+              mode: "cors",
+              credentials: "omit",
+              cache: "no-store"
+            },
+            3500
+          );
+          return normalBuf;
+        } catch (_) {}
+
+        // BƯỚC 3: Nếu server1.streamcap.store chặn CORS trên trình duyệt, lấy qua Proxy của Server (/api/videos?rawProxy=1)
+        const proxyRes = await fetch(proxyEndpoint, { cache: "no-store" });
+        if (!proxyRes.ok && proxyRes.status !== 206) {
+          throw new Error(`PROXY_HTTP_${proxyRes.status}`);
+        }
+        const proxyBuf = await proxyRes.arrayBuffer();
+        if (!proxyBuf || proxyBuf.byteLength === 0) {
+          throw new Error("PROXY_EMPTY");
+        }
+        if (isKey && proxyBuf.byteLength !== 16) {
+          throw new Error(`PROXY_BAD_KEY_${proxyBuf.byteLength}`);
+        }
+        return proxyBuf;
+      };
+
+      runLoad()
+        .then((buf) => {
+          if (this.abortFlag) return;
+          const now = performance.now();
+          this.stats.loading.first = now;
+          this.stats.loading.end = now;
+          this.stats.loaded = buf.byteLength;
+          this.stats.total = buf.byteLength;
+
+          callbacks.onSuccess(
+            { url: targetUrl, data: buf },
+            this.stats,
+            context,
+            null
+          );
+        })
+        .catch((err) => {
+          if (this.abortFlag) return;
+          callbacks.onError(
+            { code: 403, text: err?.message || "load_failed" },
+            context,
+            null,
+            this.stats
+          );
+        });
+    }
+  };
+}
+
 export default function Player({
   video,
   src,
@@ -162,10 +335,8 @@ export default function Player({
     const startWatchdog = () => {
       clearWatchdog();
       watchdogTimerRef.current = setTimeout(() => {
-        // CHỈ chuyển server nếu sau 20 giây mà thẻ <video> vẫn chưa tải được metadata (readyState === 0)
-        // Nếu đã lên hình (readyState >= 1, như hình chú khủng long QMH V3) thì TUYỆT ĐỐI KHÔNG tự chuyển server!
-        if (!isCancelled && el && el.readyState === 0) {
-          switchNextServer("Quá 20s chưa kết nối được luồng");
+        if (!isCancelled && el && el.readyState < 2 && el.currentTime === 0) {
+          switchNextServer("Quá 20s chưa giải mã được khung hình");
         }
       }, 20000);
     };
@@ -175,7 +346,6 @@ export default function Player({
       const playPromise = el.play();
       if (playPromise && typeof playPromise.catch === "function") {
         playPromise.catch(() => {
-          // Nếu trình duyệt chặn Autoplay có tiếng, tự động phát ở chế độ tắt tiếng trước để video chạy luôn!
           if (!isCancelled && el) {
             el.muted = true;
             el.play().catch(() => {});
@@ -184,7 +354,6 @@ export default function Player({
       }
     };
 
-    el.addEventListener("loadedmetadata", clearWatchdog);
     el.addEventListener("loadeddata", clearWatchdog);
     el.addEventListener("canplay", clearWatchdog);
     el.addEventListener("playing", clearWatchdog);
@@ -201,7 +370,6 @@ export default function Player({
       return () => {
         isCancelled = true;
         clearWatchdog();
-        el.removeEventListener("loadedmetadata", clearWatchdog);
         el.removeEventListener("loadeddata", clearWatchdog);
         el.removeEventListener("canplay", clearWatchdog);
         el.removeEventListener("playing", clearWatchdog);
@@ -213,17 +381,21 @@ export default function Player({
       startWatchdog();
 
       if (window.Hls && window.Hls.isSupported()) {
+        const HybridLoader = createHybridFetchLoader(window.Hls);
         const hls = new window.Hls({
-          enableWorker: true,
+          // Tắt enableWorker để HybridLoader chạy trên main thread và chia sẻ phiên mạng trực tiếp của trình duyệt
+          enableWorker: false,
           lowLatencyMode: false,
+          loader: HybridLoader,
+          fLoader: HybridLoader,
           manifestLoadingTimeOut: 15000,
-          manifestLoadingMaxRetry: 3,
+          manifestLoadingMaxRetry: 2,
           levelLoadingTimeOut: 15000,
-          levelLoadingMaxRetry: 3,
+          levelLoadingMaxRetry: 2,
           fragLoadingTimeOut: 20000,
-          fragLoadingMaxRetry: 4,
+          fragLoadingMaxRetry: 3,
           keyLoadingTimeOut: 12000,
-          keyLoadingMaxRetry: 3,
+          keyLoadingMaxRetry: 2,
           xhrSetup: (xhr) => {
             xhr.withCredentials = false;
           }
@@ -243,24 +415,23 @@ export default function Player({
 
         hls.on(window.Hls.Events.KEY_LOADED, () => {
           if (isCancelled) return;
-          setLiveDiagnostic("Key AES-128 OK -> Đang tải Frag #0...");
+          setLiveDiagnostic("Key AES-128 (16 bytes) OK! -> Đang tải Frag #0...");
         });
 
-        // Ngay khi tải được Frag đầu tiên (hoặc giải mã xong), hủy ngay bộ đếm timeout để giữ nguyên Server #1 (VIP)!
         hls.on(window.Hls.Events.FRAG_LOADED, (_, data) => {
           if (isCancelled) return;
           clearWatchdog();
           setLiveDiagnostic(
-            `Frag #${data.frag?.sn ?? 0} đã tải (${
+            `Frag #${data.frag?.sn ?? 0} OK (${
               data.frag?.stats?.loaded || 0
-            } bytes) -> Đang phát!`
+            } bytes) -> Đang giải mã video...`
           );
         });
 
         hls.on(window.Hls.Events.FRAG_PARSED, () => {
           if (isCancelled) return;
           clearWatchdog();
-          setLiveDiagnostic("Đã giải mã hình ảnh thành công!");
+          setLiveDiagnostic("Đang phát video thành công!");
         });
 
         hls.on(window.Hls.Events.ERROR, (_, data) => {
@@ -271,22 +442,18 @@ export default function Player({
             data.networkDetails?.responseURL ||
             "";
           const shortUrl = failedUrl ? ` [${failedUrl.slice(0, 80)}]` : "";
-          const errCode = data.response?.code
-            ? `(${data.response.code})`
+          const errText = data.response?.text
+            ? ` (${data.response.text})`
+            : data.response?.code
+            ? ` (${data.response.code})`
             : "";
-          const detailMsg = `${data.type}: ${data.details} ${errCode}${shortUrl}`.trim();
+          const detailMsg = `${data.type}: ${data.details}${errText}${shortUrl}`.trim();
           setLiveDiagnostic(`Lỗi: ${detailMsg}`);
 
           if (data.fatal) {
             if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
               hls.recoverMediaError();
               return;
-            }
-            if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
-              // Cho phép Hls.js thử kết nối lại 1 lần trước khi đổi server
-              try {
-                hls.startLoad();
-              } catch (_) {}
             }
             try {
               hls.destroy();
@@ -324,7 +491,6 @@ export default function Player({
     return () => {
       isCancelled = true;
       clearWatchdog();
-      el.removeEventListener("loadedmetadata", clearWatchdog);
       el.removeEventListener("loadeddata", clearWatchdog);
       el.removeEventListener("canplay", clearWatchdog);
       el.removeEventListener("playing", clearWatchdog);
