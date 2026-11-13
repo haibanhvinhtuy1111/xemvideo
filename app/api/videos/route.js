@@ -205,7 +205,6 @@ const SYSTEM_TITLES_BLACKLIST = [
   "trang chủ"
 ];
 
-// Danh sách đen chặn sạch 100% các banner sảnh cược & game trên qmhv3.top
 const QMH_CASINO_BLACKLIST = [
   "banner",
   "win-big",
@@ -215,7 +214,6 @@ const QMH_CASINO_BLACKLIST = [
   "3333-vnd",
   "3333vnd",
   "currency",
-  "nnd",
   "vip-3-ngay",
   "mien-phi-vip",
   "minimal-crash",
@@ -236,8 +234,7 @@ const QMH_CASINO_BLACKLIST = [
   "promotions",
   "affiliate",
   "fairness",
-  "help",
-  " wallet",
+  "wallet",
   "deposit",
   "withdraw"
 ];
@@ -250,7 +247,7 @@ export async function OPTIONS() {
 }
 
 function cleanText(str = "") {
-  return str
+  return String(str || "")
     .replace(/<[^>]+>/g, "")
     .replace(/&#8211;/g, "–")
     .replace(/&#8212;/g, "—")
@@ -319,15 +316,28 @@ function isSystemLinkOrTitle(slug = "", title = "") {
 }
 
 function isQmhCasinoOrBanner(slug = "", title = "") {
-  const s = String(slug || "").toLowerCase().trim();
+  const s = String(slug || "")
+    .toLowerCase()
+    .replace(/^qmh__/, "")
+    .trim();
   const t = String(title || "").toLowerCase().trim();
   if (!s || s.length < 4 || s.includes("/") || s.includes(" ")) return true;
-  if (/^banner[-_\d]*$/i.test(s) || /^slide[-_\d]*$/i.test(s)) return true;
-  if (QMH_CASINO_BLACKLIST.some((b) => s.includes(b) || t.includes(b))) {
+  if (/^(?:banner|slide|promo|game)[-_\d]*$/i.test(s)) return true;
+
+  const slugTokens = s.split(/[-_]+/);
+  if (
+    QMH_CASINO_BLACKLIST.some(
+      (b) =>
+        s === b ||
+        slugTokens.includes(b) ||
+        (b.includes("-") && s.includes(b)) ||
+        t === b
+    )
+  ) {
     return true;
   }
   if (
-    /win big|lottery|jackpot|3333\s*vnd|new currency|miễn phí vip|minimal crash/i.test(
+    /win big|lottery|jackpot|3333\s*vnd|new currency|miễn phí vip|minimal crash|defi/i.test(
       t
     )
   ) {
@@ -522,11 +532,11 @@ function decodeBase64Safe(str = "") {
 function unpackPacker(html = "") {
   let unpacked = "";
   const packerRegex =
-    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\.split\(['"]\|['"]\)/gi;
+    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]*?\}\s*\(\s*(['"])((?:\\.|(?!\1)[\s\S])*)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])((?:\\.|(?!\5)[\s\S])*)\5\.split\(['"]\|['"]\)/gi;
   let m;
   while ((m = packerRegex.exec(html)) !== null) {
     try {
-      let p = m[2];
+      let p = m[2].replace(/\\(['"\\])/g, "$1");
       const a = parseInt(m[3], 10);
       let c = parseInt(m[4], 10);
       const k = m[6].split("|");
@@ -803,6 +813,9 @@ function executeEmbedScriptInVm(
       jwplayer: () => ({
         setup(cfg) {
           if (cfg && cfg.file) recordUrl(cfg.file, "media");
+          if (cfg && Array.isArray(cfg.sources)) {
+            cfg.sources.forEach((s) => s && s.file && recordUrl(s.file, "media"));
+          }
           return this;
         },
         on() {
@@ -909,7 +922,7 @@ function isStaticAsset(url = "") {
   ) {
     return false;
   }
-  return /\.(?:jpg|jpeg|png|webp|gif|svg|ico|css|js|woff2?|ttf|eot|xml)$/i.test(
+  return /\.(?:jpg|jpeg|png|webp|avif|gif|svg|ico|css|js|mjs|json|map|woff2?|ttf|eot|xml|txt|vtt|srt)$/i.test(
     clean
   );
 }
@@ -927,7 +940,8 @@ function normalizeUrl(raw = "", baseDomain = "") {
   if (
     u.includes("about:blank") ||
     u.startsWith("javascript:") ||
-    u.startsWith("data:")
+    u.startsWith("data:") ||
+    u.includes("/_next/")
   ) {
     return "";
   }
@@ -949,7 +963,7 @@ function extractViet69Servers(html = "") {
   const seen = new Set();
 
   const btnRegex =
-    /<(?:button|a|li|span)[^>]*class=["']?[^"'>]*(?:video2-btn|server-btn|btn-server|play-btn)[^"'>]*["']?[^>]*>([\s\S]*?)<\/(?:button|a|li|span)>/gi;
+    /<(?:button|a|li|span|div)[^>]*class=["']?[^"'>]*(?:video2-btn|server-btn|btn-server|play-btn)[^"'>]*["']?[^>]*>([\s\S]*?)<\/(?:button|a|li|span|div)>/gi;
   let m;
   let btnIdx = 1;
   while ((m = btnRegex.exec(html)) !== null) {
@@ -1062,27 +1076,53 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
   if (buffer.startsWith("{") || buffer.startsWith("[")) {
     try {
       const parsedJson = JSON.parse(buffer);
+      const extraHtmlChunks = [];
       const inspectNode = (node) => {
         if (!node) return;
         if (typeof node === "string") {
+          if (/<(?:iframe|video|source|embed|script)\b/i.test(node)) {
+            extraHtmlChunks.push(node);
+            return;
+          }
           if (
             /^https?:\/\//i.test(node) ||
             node.startsWith("//") ||
             node.includes(".m3u8") ||
             node.includes(".mp4")
           ) {
-            if (!/\.(?:jpg|jpeg|png|webp|gif|vtt|srt)(?:\?|$)/i.test(node)) {
-              addUrl(node, node.includes(".mp4") ? "mp4" : "hls");
+            if (!isStaticAsset(node)) {
+              const isStream =
+                node.includes(".m3u8") ||
+                node.includes("/hls/") ||
+                node.includes(".mp4");
+              addUrl(
+                node,
+                node.includes(".mp4")
+                  ? "mp4"
+                  : isStream
+                  ? "hls"
+                  : "iframe"
+              );
             }
           } else {
             const dec = decodeBase64Safe(node);
-            if (
-              dec &&
-              (/^https?:\/\//i.test(dec) ||
+            if (dec) {
+              if (/<(?:iframe|video|source)\b/i.test(dec)) {
+                extraHtmlChunks.push(dec);
+              } else if (
+                /^https?:\/\//i.test(dec) ||
                 dec.includes(".m3u8") ||
-                dec.includes(".mp4"))
-            ) {
-              addUrl(dec, dec.includes(".mp4") ? "mp4" : "hls");
+                dec.includes(".mp4")
+              ) {
+                addUrl(
+                  dec,
+                  dec.includes(".mp4")
+                    ? "mp4"
+                    : dec.includes(".m3u8")
+                    ? "hls"
+                    : "iframe"
+                );
+              }
             }
           }
           return;
@@ -1102,14 +1142,24 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
             node.hls ||
             node.mp4 ||
             node.link ||
-            node.stream;
+            node.stream ||
+            node.embedUrl ||
+            node.iframe;
           if (typeof directUrl === "string" && directUrl.trim()) {
-            const nodeType = String(node.type || "").toLowerCase();
-            const fType =
-              nodeType.includes("mp4") || directUrl.includes(".mp4")
-                ? "mp4"
-                : "hls";
-            addUrl(directUrl, fType);
+            if (/<(?:iframe|video|source)\b/i.test(directUrl)) {
+              extraHtmlChunks.push(directUrl);
+            } else {
+              const nodeType = String(node.type || "").toLowerCase();
+              const fType =
+                nodeType.includes("mp4") || directUrl.includes(".mp4")
+                  ? "mp4"
+                  : nodeType.includes("hls") ||
+                    directUrl.includes(".m3u8") ||
+                    directUrl.includes("/hls/")
+                  ? "hls"
+                  : "iframe";
+              addUrl(directUrl, fType);
+            }
           }
           for (const [k, v] of Object.entries(node)) {
             if (
@@ -1125,7 +1175,11 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
         }
       };
       inspectNode(parsedJson);
-      if (results.length > 0) return results;
+      if (extraHtmlChunks.length > 0) {
+        buffer += "\n" + extraHtmlChunks.join("\n");
+      } else if (results.length > 0) {
+        return results;
+      }
     } catch (_) {}
   }
 
@@ -1182,19 +1236,18 @@ function parsePlayerHtml(rawHtml = "", baseDomain = "") {
   }
 
   const jsFieldRegex =
-    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|contentUrl|video_url|videoUrl|videoSource|securedLink|stream_url|hls|hlsUrl|mp4|mp4Url|link|clip)["']?)\s*[:=]\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+|\/[^"'\s<>]+)["']/gi;
+    /(?:["']?(?:file|source|src|url|embed_url|embedUrl|contentUrl|video_url|videoUrl|videoSource|securedLink|stream_url|streamUrl|playUrl|hls|hlsUrl|mp4|mp4Url|link|clip)["']?)\s*[:=]\s*["'](https?:\/\/[^"'\s<>]+|\/\/[^"'\s<>]+|\/[^"'\s<>]+)["']/gi;
   while ((m = jsFieldRegex.exec(buffer)) !== null) {
     const fieldCall = m[0].toLowerCase();
     const rawVal = m[1];
-    if (
-      /\.(?:jpg|jpeg|png|webp|gif|vtt|srt|ass|css|js)(?:\?|$)/i.test(rawVal)
-    ) {
+    if (isStaticAsset(rawVal)) {
       continue;
     }
     const isHlsField =
       fieldCall.includes("videosource") ||
       fieldCall.includes("securedlink") ||
       fieldCall.includes("hls") ||
+      fieldCall.includes("stream") ||
       rawVal.includes(".m3u8");
     const isMp4Field = fieldCall.includes("mp4") || rawVal.includes(".mp4");
     addUrl(rawVal, isMp4Field ? "mp4" : isHlsField ? "hls" : "");
@@ -1257,7 +1310,7 @@ function extractLegacyAndDirectMedia(
   });
 }
 
-async function resolveEmbedPage(iframeUrl, postLink, baseDomain) {
+async function resolveEmbedPage(iframeUrl, postLink) {
   const directStreams = [];
   let embedSnippet = "";
   let embedCookies = "";
@@ -1511,7 +1564,7 @@ async function fetchViet69PlayerUrl({
   for (const item of parsed) {
     if (item.type === "iframe") {
       const { directStreams, embedSnippet, embedCookies, isAlive } =
-        await resolveEmbedPage(item.url, postLink, baseDomain);
+        await resolveEmbedPage(item.url, postLink);
       if (embedSnippet) hopLog += `\n -> [Body]: ${embedSnippet}`;
 
       for (const ds of directStreams) {
@@ -1723,7 +1776,8 @@ function extractThumbnailFromBlock(block = "", baseDomain = "") {
       lower.includes("avatar") ||
       lower.includes("list-top-images") ||
       lower.includes("/themes/") ||
-      lower.includes("/plugins/")
+      lower.includes("/plugins/") ||
+      /\.(?:js|css|json|xml|woff2?|ttf)(?:\?|$)/i.test(lower)
     );
   };
 
@@ -1740,6 +1794,10 @@ function extractThumbnailFromBlock(block = "", baseDomain = "") {
     } catch (_) {}
   }
 
+  const imgTagScope =
+    (block.match(/<(?:img|video|source|div|span)\b[^>]*>/gi) || []).join(" ") ||
+    block;
+
   const attrs = [
     "data-litespeed-src",
     "data-lazy-src",
@@ -1754,7 +1812,7 @@ function extractThumbnailFromBlock(block = "", baseDomain = "") {
       "gi"
     );
     let m;
-    while ((m = regex.exec(block)) !== null) {
+    while ((m = regex.exec(imgTagScope)) !== null) {
       let val = (m[1] || m[2] || "").trim().replace(/&amp;/g, "&");
       if (isInvalidThumbUrl(val)) continue;
       if (val.startsWith("//")) val = `https:${val}`;
@@ -2016,7 +2074,7 @@ function sortVideoItems(items = [], sortBy = "latest") {
 }
 
 // =====================================================================
-// BỘ GIẢI MÃ CHUYÊN SÂU KHO PHIM THẬT QMHV3.TOP (CHẶN 100% BANNER CASINO)
+// BỘ GIẢI MÃ KHO PHIM QMHV3.TOP (LỌC SẠCH BANNER CASINO)
 // =====================================================================
 function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
   if (!rawJson) return null;
@@ -2034,7 +2092,7 @@ function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
     if (!node) return;
     if (Array.isArray(node)) {
       if (
-        node.length >= 2 &&
+        node.length >= 1 &&
         typeof node[0] === "object" &&
         node[0] !== null
       ) {
@@ -2083,7 +2141,6 @@ function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
         )
       );
 
-      // Chặn toàn bộ banner quảng cáo cược và game casino
       if (isQmhCasinoOrBanner(rawSlug, title) || seen.has(rawSlug)) {
         continue;
       }
@@ -2096,16 +2153,18 @@ function normalizeQmhJsonItems(rawJson, baseDomain = QMH_DOMAIN) {
           item.cover ||
           item.pic ||
           item.vod_pic ||
+          item.thumbnailUrl ||
+          item.posterUrl ||
+          item.thumbUrl ||
           ""
       ).trim();
 
       if (thumb.startsWith("//")) thumb = `https:${thumb}`;
       else if (thumb.startsWith("/")) thumb = `${baseDomain}${thumb}`;
 
-      // Phim thật luôn có ảnh thumbnail hợp lệ
       if (
         !thumb.startsWith("http") ||
-        /logo|favicon|list-top-images|banner/i.test(thumb)
+        /logo|favicon|list-top-images|\/banners?\//i.test(thumb)
       ) {
         continue;
       }
@@ -2182,10 +2241,10 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
     if (img.startsWith("//")) img = `https:${img}`;
     else if (img.startsWith("/")) img = `${baseDomain}${img}`;
 
-    // Bắt buộc phải có ảnh bìa thật (Loại bỏ các object chỉ có chữ của sảnh cược)
     if (
       !img.startsWith("http") ||
-      /logo|favicon|icon|list-top-images|banner/i.test(img)
+      /logo|favicon|list-top-images|\/banners?\//i.test(img) ||
+      /\.(?:js|css|json|xml|woff2?)(?:\?|$)/i.test(img)
     ) {
       return;
     }
@@ -2219,15 +2278,24 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
     (_, hex) => String.fromCharCode(parseInt(hex, 16))
   );
 
-  // 1. Quét mọi thẻ <a href="/watch/<slug>"> trong HTML
+  // 1. Quét thẻ <a href="/watch/<slug>"> trong HTML
   const watchLinkRegex =
     /<a\b[^>]*href=["']?(?:https?:\/\/[^"'\s>]*)?\/watch\/([^"'/?#\s>]+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = watchLinkRegex.exec(html)) !== null) {
     const rawSlug = m[1].trim();
     const aInner = m[2] || "";
-    const startCtx = Math.max(0, m.index - 350);
-    const endCtx = Math.min(html.length, m.index + m[0].length + 700);
+    const prevLinkBoundary = html.lastIndexOf("/watch/", Math.max(0, m.index - 10));
+    const nextLinkBoundary = html.indexOf("/watch/", m.index + m[0].length);
+
+    const startCtx = Math.max(
+      prevLinkBoundary !== -1 ? prevLinkBoundary + 20 : 0,
+      m.index - 220
+    );
+    const endCtx = Math.min(
+      nextLinkBoundary !== -1 ? nextLinkBoundary : html.length,
+      m.index + m[0].length + 350
+    );
     const contextBlock = html.slice(startCtx, endCtx);
 
     const thumb =
@@ -2249,14 +2317,14 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
     registerCandidate(rawSlug, title, thumb, stats);
   }
 
-  // 2. Quét mọi đường dẫn `/watch/<slug>` trong gói RSC Flight
+  // 2. Quét đường dẫn `/watch/<slug>` trong RSC Flight
   const watchRegex = /\/watch\/([a-zA-Z0-9_-]{5,140})/g;
   let wm;
   while ((wm = watchRegex.exec(normalizedText)) !== null) {
     const candidateSlug = wm[1];
     if (seen.has(candidateSlug)) continue;
-    const windowStart = Math.max(0, wm.index - 500);
-    const windowEnd = Math.min(normalizedText.length, wm.index + 900);
+    const windowStart = Math.max(0, wm.index - 400);
+    const windowEnd = Math.min(normalizedText.length, wm.index + 700);
     const chunk = normalizedText.slice(windowStart, windowEnd);
 
     const titleM =
@@ -2265,10 +2333,10 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
       chunk.match(/\balt=["']([^"']{3,200})["']/i);
     const thumbM =
       chunk.match(
-        /"(?:thumbnail|thumb|poster|image|cover|pic|vod_pic|src)"\s*:\s*"(https?:\/\/[^"\s]+|\/[^"\s]+\.(?:jpg|jpeg|png|webp|avif)[^"\s]*)"/i
+        /"(?:thumbnail|thumb|poster|image|cover|pic|vod_pic|thumbnailUrl|posterUrl|thumbUrl)"\s*:\s*"(https?:\/\/[^"\s]+|\/[^"\s]+)"/i
       ) ||
       chunk.match(
-        /\bsrc=["'](https?:\/\/[^"'\s]+|\/[^"'\s]+\.(?:jpg|jpeg|png|webp|avif)[^"'\s]*)["']/i
+        /<img\b[^>]*\bsrc=["'](https?:\/\/[^"'\s]+|\/[^"'\s]+)["']/i
       );
 
     registerCandidate(
@@ -2278,31 +2346,23 @@ function parseQmhListFromHtml(html = "", baseDomain = QMH_DOMAIN) {
     );
   }
 
-  // 3. Quét các object có chứa `"slug":"..."` VÀ CÓ ẢNH THUMBNAIL THẬT (loại bỏ hoàn toàn các object chỉ có chữ như "Win big with DeFi")
+  // 3. Quét các object có chứa `"slug":"..."` kèm ảnh thumbnail hợp lệ
   const slugKeyRegex = /"slug"\s*:\s*"([a-zA-Z0-9_-]{5,140})"/g;
   let sm;
   while ((sm = slugKeyRegex.exec(normalizedText)) !== null) {
     const candidateSlug = sm[1];
     if (seen.has(candidateSlug)) continue;
 
-    // Khoanh vùng 1 object đơn lẻ xung quanh vị trí "slug"
-    const openBrace = normalizedText.lastIndexOf("{", sm.index);
-    const closeBrace = normalizedText.indexOf("}", sm.index);
-    const objSlice =
-      openBrace !== -1 &&
-      closeBrace !== -1 &&
-      closeBrace - openBrace < 1500
-        ? normalizedText.slice(openBrace, closeBrace + 1)
-        : normalizedText.slice(
-            Math.max(0, sm.index - 350),
-            Math.min(normalizedText.length, sm.index + 650)
-          );
+    const objSlice = normalizedText.slice(
+      Math.max(0, sm.index - 450),
+      Math.min(normalizedText.length, sm.index + 750)
+    );
 
     const titleM = objSlice.match(
       /"(?:title|name|vod_name)"\s*:\s*"([^"]{3,220})"/i
     );
     const thumbM = objSlice.match(
-      /"(?:thumbnail|thumb|poster|image|cover|pic|vod_pic|posterUrl|thumbUrl)"\s*:\s*"([^"]{5,400})"/i
+      /"(?:thumbnail|thumb|poster|image|cover|pic|vod_pic|posterUrl|thumbUrl|thumbnailUrl)"\s*:\s*"([^"]{5,400})"/i
     );
     const viewsM = objSlice.match(
       /"(?:views|view|viewCount)"\s*:\s*"?(\d[\d,.]*[kKmM]?)"?/i
@@ -2336,42 +2396,46 @@ async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
     RSC: "1"
   };
 
-  // Gọi đồng thời:
-  // 1. API JSON của qmhv3.top
-  // 2. Trang ?tab=movie kèm RSC: 1
-  // 3. Trang ?tab=casino&category=movie
-  // 4. Trang xem video mẫu `/watch/yylive-tracky2k-10112026` (nơi luôn có sẵn danh sách video đề xuất thật!)
   const apiUrl = `${QMH_DOMAIN}/api/videos?category=movie&page=${page}&sort=${sortBy}${
     q ? `&q=${encodeURIComponent(q)}` : ""
   }`;
   const movieTabUrl = q
     ? `${QMH_DOMAIN}/?tab=movie&category=movie&q=${encodeURIComponent(q)}&page=${page}`
     : `${QMH_DOMAIN}/?tab=movie&category=movie&page=${page}`;
-  const hybridTabUrl = `${QMH_DOMAIN}/?tab=casino&category=movie&page=${page}`;
+  const hybridTabUrl = q
+    ? `${QMH_DOMAIN}/?tab=casino&category=movie&q=${encodeURIComponent(q)}&page=${page}`
+    : `${QMH_DOMAIN}/?tab=casino&category=movie&page=${page}`;
   const seedWatchUrl = `${QMH_DOMAIN}/watch/yylive-tracky2k-10112026`;
+
+  const shouldFetchSeed = page === 1 && !q;
 
   const [apiRes, rscMovieRes, htmlMovieRes, seedWatchRes] = await Promise.all([
     fetchFastText(apiUrl, qmhHeaders, 4000),
     fetchFastText(movieTabUrl, rscHeaders, 4000),
     fetchFastText(hybridTabUrl, qmhHeaders, 4000),
-    fetchFastText(seedWatchUrl, qmhHeaders, 4000)
+    shouldFetchSeed
+      ? fetchFastText(seedWatchUrl, qmhHeaders, 4000)
+      : Promise.resolve({ text: "", via: "skipped", status: 0 })
   ]);
 
-  // 1. Kiểm tra API JSON nếu có danh sách phim
   if (apiRes.text && apiRes.text.length > 150) {
     const normalized = normalizeQmhJsonItems(apiRes.text, QMH_DOMAIN);
     if (normalized && normalized.items.length > 0) {
+      const filteredApiItems = q
+        ? normalized.items.filter((x) =>
+            x.title.toLowerCase().includes(q.toLowerCase())
+          )
+        : normalized.items;
       return {
-        items: sortVideoItems(normalized.items, sortBy),
+        items: sortVideoItems(filteredApiItems, sortBy),
         page,
         totalPages: normalized.totalPages,
-        total: normalized.totalPages * normalized.items.length,
+        total: normalized.totalPages * filteredApiItems.length,
         categories: []
       };
     }
   }
 
-  // 2. Gom và phân tích từ tất cả các luồng HTML / RSC trả về
   const combinedMap = new Map();
   const sourcesToParse = [
     rscMovieRes.text,
@@ -2383,36 +2447,16 @@ async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
     if (!srcText) continue;
     const extracted = parseQmhListFromHtml(srcText, QMH_DOMAIN);
     for (const item of extracted) {
+      if (q && !item.title.toLowerCase().includes(q.toLowerCase())) {
+        continue;
+      }
       if (!combinedMap.has(item.slug)) {
         combinedMap.set(item.slug, item);
       }
     }
   }
 
-  // 3. Nếu trong HTML có link tới file JS bundle `/_next/static/chunks/app/page-*.js`, tự động quét nhanh file JS đó để tìm endpoint API thật của kho phim
   const sampleHtml = htmlMovieRes.text || rscMovieRes.text || "";
-  if (combinedMap.size === 0 && sampleHtml) {
-    const chunkMatch = sampleHtml.match(
-      /(\/_next\/static\/chunks\/app\/page-[a-zA-Z0-9_-]+\.js)/i
-    );
-    if (chunkMatch && chunkMatch[1]) {
-      const chunkUrl = `${QMH_DOMAIN}${chunkMatch[1]}`;
-      const { text: jsBundle } = await fetchFastText(
-        chunkUrl,
-        qmhHeaders,
-        3500
-      );
-      if (jsBundle) {
-        const jsExtracted = parseQmhListFromHtml(jsBundle, QMH_DOMAIN);
-        for (const item of jsExtracted) {
-          if (!combinedMap.has(item.slug)) {
-            combinedMap.set(item.slug, item);
-          }
-        }
-      }
-    }
-  }
-
   const finalItems = sortVideoItems([...combinedMap.values()], sortBy);
   if (finalItems.length > 0) {
     const totalPages = Math.max(
@@ -2439,10 +2483,7 @@ async function fetchQmhVideoList({ page = 1, q = "", sortBy = "latest" }) {
       apiPreview: apiRes.text.slice(0, 200),
       rscLen: rscMovieRes.text.length,
       htmlLen: htmlMovieRes.text.length,
-      seedWatchLen: seedWatchRes.text.length,
-      seedWatchPreview: seedWatchRes.text
-        ? seedWatchRes.text.replace(/\\"/g, '"').slice(0, 400)
-        : ""
+      seedWatchLen: seedWatchRes.text.length
     }
   };
 }
@@ -2480,9 +2521,20 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
     return u;
   };
 
-  const addQmhSource = (rawUrl, type = "hls", label = "Server QMH") => {
+  const addQmhSource = (
+    rawUrl,
+    type = "hls",
+    label = "Server QMH",
+    refererOverride = "",
+    embedCookies = ""
+  ) => {
     const mediaUrl = unwrapQmhMediaUrl(rawUrl);
     if (!mediaUrl || !mediaUrl.startsWith("http")) return;
+
+    const effectiveReferer = refererOverride || postLink;
+    const cookieSuffix = embedCookies
+      ? `&cookie=${encodeURIComponent(embedCookies)}`
+      : "";
 
     if (
       type === "hls" ||
@@ -2492,7 +2544,7 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
     ) {
       const streamType = mediaUrl.includes(".mp4") ? "mp4" : "hls";
       allStreams.push(mediaUrl);
-      const proxyStreamUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(postLink)}`;
+      const proxyStreamUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
       customSources.push({
         label: `${label} (VIP)`,
         name: `${label} (VIP)`,
@@ -2514,7 +2566,7 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
       });
     } else {
       allIframes.push(mediaUrl);
-      const proxyEmbedUrl = `/api/videos?embedProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(postLink)}`;
+      const proxyEmbedUrl = `/api/videos?embedProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}`;
       const preferDirect = shouldUseDirectIframe(mediaUrl);
       if (preferDirect) {
         customSources.push({
@@ -2636,7 +2688,11 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
         if (u.hostname.includes("qmhv3")) {
           return /(?:embed|player|play|stream|video)/i.test(u.pathname);
         }
-        return true;
+        return (
+          DIRECT_IFRAME_HOSTS.some((h) => u.hostname.includes(h)) ||
+          PROXY_PREFERRED_HOSTS.some((h) => u.hostname.includes(h)) ||
+          /(?:embed|player|play|stream|video)/i.test(u.pathname)
+        );
       } catch (_) {
         return false;
       }
@@ -2644,7 +2700,20 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
 
     for (let i = 0; i < extractedMedia.length; i++) {
       const item = extractedMedia[i];
-      addQmhSource(item.url, item.type, `Server #${i + 1}`);
+      const serverLabel = `Server #${i + 1}`;
+      if (item.type === "iframe") {
+        const { directStreams } = await resolveEmbedPage(item.url, postLink);
+        for (const ds of directStreams) {
+          addQmhSource(
+            ds.url,
+            ds.type,
+            serverLabel,
+            ds.referer || item.url,
+            ds.embedCookies
+          );
+        }
+      }
+      addQmhSource(item.url, item.type, serverLabel);
     }
   }
 
@@ -2702,7 +2771,11 @@ async function handleRawProxy(req) {
   }
 
   try {
-    const refOrigin = new URL(referer).origin;
+    let refOrigin = DEFAULT_DOMAIN;
+    try {
+      refOrigin = new URL(referer).origin;
+    } catch (_) {}
+
     const method = (req.method || "GET").toUpperCase();
 
     const headers = {
@@ -2749,7 +2822,7 @@ async function handleRawProxy(req) {
       finalTargetUrl.includes("playlist") ||
       finalTargetUrl.includes("master") ||
       finalTargetUrl.includes("/api/get-video") ||
-      (contentLength > 0 && contentLength < 250000);
+      (contentLength > 0 && contentLength < 120000);
 
     if (!mightBeM3u8 && upstream.body) {
       const streamHeaders = {
@@ -2777,11 +2850,10 @@ async function handleRawProxy(req) {
     if (
       firstBytes.startsWith("#EXTM3U") ||
       contentType.includes("mpegurl") ||
-      finalTargetUrl.includes(".m3u8")
+      (finalTargetUrl.includes(".m3u8") && firstBytes.startsWith("#"))
     ) {
-      const selfOrigin = req.nextUrl.origin;
       const buildProxyUrl = (absUrl) =>
-        `${selfOrigin}/api/videos?rawProxy=1&url=${encodeURIComponent(absUrl)}&referer=${encodeURIComponent(referer)}${
+        `/api/videos?rawProxy=1&url=${encodeURIComponent(absUrl)}&referer=${encodeURIComponent(referer)}${
           cookie ? `&cookie=${encodeURIComponent(cookie)}` : ""
         }`;
 
@@ -2793,6 +2865,7 @@ async function handleRawProxy(req) {
           if (!trimmed) return line;
           if (trimmed.startsWith("#")) {
             return line.replace(/URI=["']([^"']+)["']/gi, (_, uri) => {
+              if (uri.includes("/api/videos?")) return `URI="${uri}"`;
               try {
                 const abs = new URL(uri, finalTargetUrl).toString();
                 return `URI="${buildProxyUrl(abs)}"`;
@@ -2801,6 +2874,7 @@ async function handleRawProxy(req) {
               }
             });
           }
+          if (trimmed.includes("/api/videos?")) return trimmed;
           try {
             const abs = new URL(trimmed, finalTargetUrl).toString();
             return buildProxyUrl(abs);
@@ -2824,10 +2898,12 @@ async function handleRawProxy(req) {
       ...CORS,
       "Content-Type":
         upstream.headers.get("content-type") || "application/octet-stream",
-      "Cache-Control": "no-store"
+      "Cache-Control": "public, max-age=3600"
     };
     const contentRange = upstream.headers.get("content-range");
     if (contentRange) resHeaders["Content-Range"] = contentRange;
+    const acceptRanges = upstream.headers.get("accept-ranges");
+    if (acceptRanges) resHeaders["Accept-Ranges"] = acceptRanges;
 
     return new NextResponse(buffer, {
       status: upstream.status,
@@ -2841,13 +2917,15 @@ async function handleRawProxy(req) {
 function transformEmbedJsCode(js = "") {
   if (!js || !js.trim()) return js;
   return js
-    .replace(/\bwindow\.location\b/g, "window.__fakeLoc")
-    .replace(/\bdocument\.location\b/g, "window.__fakeLoc")
-    .replace(/\bself\.location\b/g, "window.__fakeLoc")
-    .replace(/\btop\.location\b/g, "window.__fakeTopLoc")
-    .replace(/\bparent\.location\b/g, "window.__fakeTopLoc")
+    .replace(/(?<![.\w$])window\.top\.location\b/g, "window.__fakeTopLoc")
+    .replace(/(?<![.\w$])window\.parent\.location\b/g, "window.__fakeTopLoc")
+    .replace(/(?<![.\w$])window\.location\b/g, "window.__fakeLoc")
+    .replace(/(?<![.\w$])document\.location\b/g, "window.__fakeLoc")
+    .replace(/(?<![.\w$])self\.location\b/g, "window.__fakeLoc")
+    .replace(/(?<![.\w$])top\.location\b/g, "window.__fakeTopLoc")
+    .replace(/(?<![.\w$])parent\.location\b/g, "window.__fakeTopLoc")
     .replace(
-      /\blocation\.(href|hostname|host|origin|pathname|search|assign|replace|reload)\b/g,
+      /(?<![.\w$])location\.(href|hostname|host|origin|pathname|search|assign|replace|reload)\b/g,
       "window.__fakeLoc.$1"
     );
 }
@@ -3031,8 +3109,8 @@ export async function GET(req) {
             var REF_PATHNAME = ${JSON.stringify(refUrlObj.pathname)};
 
             var COOKIE_STR = ${JSON.stringify(embedCookies)};
-            var RAW_PROXY = window.location.origin + "/api/videos?rawProxy=1";
-            var SCRIPT_PROXY = window.location.origin + "/api/videos?scriptProxy=1";
+            var RAW_PROXY = "/api/videos?rawProxy=1";
+            var SCRIPT_PROXY = "/api/videos?scriptProxy=1";
 
             if (VIDEO_UUID && !window.videoId) {
               window.videoId = VIDEO_UUID;
@@ -3397,9 +3475,19 @@ export async function GET(req) {
             url: proxyStreamUrl,
             src: proxyStreamUrl,
             rawUrl: mediaItem.url,
+            backupUrl: mediaItem.url,
             proxyUrl: proxyStreamUrl,
             type: mediaItem.type,
             priority: isAlive ? 1 : 9
+          });
+          customSources.push({
+            label: `${baseLabel} (Trực tiếp)`,
+            name: `${baseLabel} (Trực tiếp)`,
+            url: mediaItem.url,
+            src: mediaItem.url,
+            backupUrl: proxyStreamUrl,
+            type: mediaItem.type,
+            priority: isAlive ? 3 : 9
           });
           return;
         }
@@ -3530,8 +3618,7 @@ export async function GET(req) {
           if (dItem.type === "iframe") {
             const { directStreams, isAlive } = await resolveEmbedPage(
               dItem.url,
-              postLink,
-              baseDomain
+              postLink
             );
             for (const ds of directStreams) {
               registerMediaSource({ ...ds, isAlive: true }, label);
@@ -3545,9 +3632,17 @@ export async function GET(req) {
 
       customSources.sort((a, b) => (a.priority || 5) - (b.priority || 5));
 
+      const uniqueSources = [];
+      const seenUrls = new Set();
+      for (const s of customSources) {
+        if (!s.url || seenUrls.has(s.url)) continue;
+        seenUrls.add(s.url);
+        uniqueSources.push(s);
+      }
+
       const streams = [...new Set(allStreams)];
       const iframes = [...new Set(allIframes)];
-      const primarySource = customSources[0] || null;
+      const primarySource = uniqueSources[0] || null;
       const primaryUrl = primarySource?.url || streams[0] || iframes[0] || "";
       const primaryType = primarySource?.type || (streams[0] ? "hls" : "iframe");
 
@@ -3573,7 +3668,7 @@ export async function GET(req) {
           videoType: primaryType,
           streams,
           iframes,
-          sources: customSources,
+          sources: uniqueSources,
           _debug: debugInfo
         },
         { status: 200, headers: CORS }
