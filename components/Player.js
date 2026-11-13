@@ -2,25 +2,34 @@
 
 import { useEffect, useRef, useState } from "react";
 
-// Tạo Custom Loader cho Hls.js: Khi tải Key hoặc Segment của qmhv3.top,
-// dùng fetch() với referrerPolicy: "no-referrer" (ẩn hoàn toàn tên miền vercel.app)
-// và đua song song với Proxy để không bao giờ bị lỗi keyLoadError (403)
-function createQmhMultiRouteLoader(HlsClass) {
+function createUniversalHlsLoader(HlsClass, postReferer = "https://qmhv3.top/") {
   const DefaultLoader = HlsClass.DefaultConfig.loader;
 
-  return class QmhMultiRouteLoader {
+  return class UniversalHlsLoader {
     constructor(config) {
       this.inner = new DefaultLoader(config);
       this.aborted = false;
+      this.controller =
+        typeof AbortController !== "undefined" ? new AbortController() : null;
     }
 
     destroy() {
       this.aborted = true;
+      if (this.controller) {
+        try {
+          this.controller.abort();
+        } catch (_) {}
+      }
       if (this.inner) this.inner.destroy();
     }
 
     abort() {
       this.aborted = true;
+      if (this.controller) {
+        try {
+          this.controller.abort();
+        } catch (_) {}
+      }
       if (this.inner) this.inner.abort();
     }
 
@@ -28,48 +37,78 @@ function createQmhMultiRouteLoader(HlsClass) {
       const url = context.url || "";
       const isBinary = context.responseType === "arraybuffer";
 
-      // Áp dụng cho mọi request tải Key giải mã hoặc phân đoạn .ts từ qmhv3.top
-      if (
-        isBinary &&
-        url.includes("qmhv3.top") &&
-        !url.includes("/api/videos?")
-      ) {
+      let rawRemoteUrl = url;
+      let customRef = postReferer;
+      if (url.includes("/api/videos?") && url.includes("url=")) {
+        try {
+          const uObj = new URL(url, window.location.origin);
+          const extracted = uObj.searchParams.get("url");
+          const extractedRef = uObj.searchParams.get("referer");
+          if (extracted && /^https?:\/\//i.test(extracted)) {
+            rawRemoteUrl = extracted;
+          }
+          if (extractedRef) {
+            customRef = extractedRef;
+          }
+        } catch (_) {}
+      }
+
+      if (isBinary && /^https?:\/\//i.test(rawRemoteUrl)) {
         const startTime = performance.now();
         const isKey =
-          url.includes(".key") ||
-          url.includes("/key") ||
-          Boolean(context.decryptdata);
+          rawRemoteUrl.includes(".key") ||
+          rawRemoteUrl.includes("/key") ||
+          url.includes("isKey=1") ||
+          Boolean(context.decryptdata && !context.frag);
 
-        const proxyFallbackUrl = `${
-          window.location.origin
-        }/api/videos?rawProxy=1${
+        const proxyUrl = `${window.location.origin}/api/videos?rawProxy=1${
           isKey ? "&isKey=1" : "&proxySegments=1"
-        }&url=${encodeURIComponent(url)}&referer=${encodeURIComponent(
-          "https://qmhv3.top/"
+        }&url=${encodeURIComponent(rawRemoteUrl)}&referer=${encodeURIComponent(
+          customRef
         )}`;
 
-        const checkBuffer = async (res) => {
+        const corsEuUrl = `https://cors.eu.org/${rawRemoteUrl}`;
+
+        const validateArrayBuffer = async (res) => {
           if (!res.ok && res.status !== 206) {
             throw new Error(`HTTP_${res.status}`);
           }
           const buf = await res.arrayBuffer();
           if (!buf || buf.byteLength === 0) {
-            throw new Error("EMPTY_BUF");
+            throw new Error("EMPTY");
+          }
+          if (buf.byteLength < 2000 && !isKey) {
+            const head = new TextDecoder()
+              .decode(buf.slice(0, 15))
+              .toLowerCase();
+            if (head.startsWith("<!doc") || head.startsWith("<html")) {
+              throw new Error("HTML_ERR");
+            }
           }
           return buf;
         };
 
-        // Đua song song:
-        // 1. Gọi trực tiếp từ IP máy người dùng nhưng ẩn hoàn toàn Referer (no-referrer)
-        // 2. Gọi qua Proxy của server
+        const signal = this.controller ? this.controller.signal : undefined;
+
         Promise.any([
-          fetch(url, {
+          fetch(rawRemoteUrl, {
             referrerPolicy: "no-referrer",
             mode: "cors",
             credentials: "omit",
-            cache: "no-store"
-          }).then(checkBuffer),
-          fetch(proxyFallbackUrl, { cache: "no-store" }).then(checkBuffer)
+            cache: "no-store",
+            signal
+          }).then(validateArrayBuffer),
+          fetch(proxyUrl, {
+            cache: "no-store",
+            signal
+          }).then(validateArrayBuffer),
+          fetch(corsEuUrl, {
+            referrerPolicy: "no-referrer",
+            mode: "cors",
+            credentials: "omit",
+            cache: "no-store",
+            signal
+          }).then(validateArrayBuffer)
         ])
           .then((buf) => {
             if (this.aborted) return;
@@ -80,17 +119,24 @@ function createQmhMultiRouteLoader(HlsClass) {
               total: buf.byteLength,
               retry: 0,
               chunkCount: 1,
-              bwEstimate: 0,
+              bwEstimate: Math.round(
+                (buf.byteLength * 8000) / Math.max(1, now - startTime)
+              ),
               loading: { start: startTime, first: now, end: now },
               parsing: { start: now, end: now },
               buffering: { start: now, first: now, end: now }
             };
-            callbacks.onSuccess({ url, data: buf }, stats, context, null);
+            callbacks.onSuccess(
+              { url: rawRemoteUrl, data: buf },
+              stats,
+              context,
+              null
+            );
           })
           .catch((err) => {
             if (this.aborted) return;
             callbacks.onError(
-              { code: 403, text: err?.message || "key_or_frag_blocked" },
+              { code: 403, text: err?.message || "frag_or_key_failed" },
               context,
               null,
               {}
@@ -237,12 +283,11 @@ export default function Player({
       clearWatchdog();
       watchdogTimerRef.current = setTimeout(() => {
         if (!isCancelled && el && el.readyState < 1 && el.currentTime === 0) {
-          switchNextServer("Quá 12s chưa nhận được khung hình");
+          switchNextServer("Quá 15s chưa nhận được khung hình");
         }
-      }, 12000);
+      }, 15000);
     };
 
-    el.addEventListener("loadedmetadata", clearWatchdog);
     el.addEventListener("loadeddata", clearWatchdog);
     el.addEventListener("playing", clearWatchdog);
 
@@ -258,7 +303,6 @@ export default function Player({
       return () => {
         isCancelled = true;
         clearWatchdog();
-        el.removeEventListener("loadedmetadata", clearWatchdog);
         el.removeEventListener("loadeddata", clearWatchdog);
         el.removeEventListener("playing", clearWatchdog);
       };
@@ -269,17 +313,18 @@ export default function Player({
       startWatchdog();
 
       if (window.Hls && window.Hls.isSupported()) {
-        const CustomLoader = createQmhMultiRouteLoader(window.Hls);
+        const refererToUse = video?.postLink || "https://qmhv3.top/";
+        const CustomLoader = createUniversalHlsLoader(window.Hls, refererToUse);
         const hls = new window.Hls({
           enableWorker: false,
           lowLatencyMode: false,
           fLoader: CustomLoader,
-          manifestLoadingTimeOut: 10000,
+          manifestLoadingTimeOut: 12000,
           manifestLoadingMaxRetry: 2,
-          levelLoadingTimeOut: 10000,
+          levelLoadingTimeOut: 12000,
           levelLoadingMaxRetry: 2,
-          fragLoadingTimeOut: 15000,
-          fragLoadingMaxRetry: 2,
+          fragLoadingTimeOut: 18000,
+          fragLoadingMaxRetry: 3,
           xhrSetup: (xhr) => {
             xhr.withCredentials = false;
           }
@@ -291,8 +336,12 @@ export default function Player({
 
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
           if (isCancelled) return;
-          clearWatchdog();
           el.play().catch(() => {});
+        });
+
+        hls.on(window.Hls.Events.FRAG_LOADED, () => {
+          if (isCancelled) return;
+          clearWatchdog();
         });
 
         hls.on(window.Hls.Events.ERROR, (_, data) => {
@@ -342,7 +391,6 @@ export default function Player({
     return () => {
       isCancelled = true;
       clearWatchdog();
-      el.removeEventListener("loadedmetadata", clearWatchdog);
       el.removeEventListener("loadeddata", clearWatchdog);
       el.removeEventListener("playing", clearWatchdog);
       if (hlsRef.current) {
@@ -352,7 +400,7 @@ export default function Player({
         hlsRef.current = null;
       }
     };
-  }, [activeUrl, activeType]);
+  }, [activeUrl, activeType, video?.postLink]);
 
   if (!activeUrl) {
     return (
@@ -376,8 +424,6 @@ export default function Player({
     );
   }
 
-  const isLocalProxyIframe = activeUrl.startsWith("/");
-
   return (
     <div className="space-y-3.5">
       {/* Khung phát Video / Iframe */}
@@ -390,9 +436,7 @@ export default function Player({
             className="h-full w-full border-0 overflow-hidden"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
             allowFullScreen
-            referrerPolicy={
-              isLocalProxyIframe ? "same-origin" : "no-referrer"
-            }
+            referrerPolicy="no-referrer"
           />
         ) : (
           <video
