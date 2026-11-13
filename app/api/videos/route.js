@@ -2102,7 +2102,7 @@ function sortVideoItems(items = [], sortBy = "latest") {
 }
 
 // =====================================================================
-// BỘ GIẢI MÃ CHUYÊN SÂU KHO PHIM QMHV3.TOP & API.QMHV3.TOP
+// BỘ GIẢI MÃ CHUYÊN SÂU KHO PHIM QMHV3.TOP & SERVER1.STREAMCAP.STORE
 // =====================================================================
 function unescapeNextRscText(raw = "") {
   if (!raw) return "";
@@ -2817,11 +2817,8 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
       const streamType = lower.includes(".mp4") ? "mp4" : "hls";
       allStreams.push(mediaUrl);
 
-      // 1. Luồng Full Proxy (Đã nhúng sẵn Key Base64 trực tiếp vào trong M3U8 + Proxy toàn bộ segment)
+      // Luôn bật proxySegments=1 cho QMH vì các segment .html trên server1.streamcap.store bắt buộc phải đi qua proxy gắn Origin: https://qmhv3.top
       const fullProxyUrl = `/api/videos?rawProxy=1&proxySegments=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
-      // 2. Luồng Hybrid (Nhúng sẵn Key Base64 vào M3U8, nhưng để trình duyệt tải thẳng segment .ts)
-      const fastHybridUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
-      // 3. Trình phát Iframe Độc lập
       const standalonePlayerUrl = `/api/videos?qmhPlayerProxy=1&url=${encodeURIComponent(mediaUrl)}&postUrl=${encodeURIComponent(postLink)}&referer=${encodeURIComponent(effectiveReferer)}`;
 
       customSources.push({
@@ -2830,19 +2827,9 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
         url: fullProxyUrl,
         src: fullProxyUrl,
         rawUrl: mediaUrl,
-        backupUrl: fastHybridUrl,
-        type: streamType,
-        priority: 1
-      });
-      customSources.push({
-        label: `${label} (VIP Nhanh)`,
-        name: `${label} (VIP Nhanh)`,
-        url: fastHybridUrl,
-        src: fastHybridUrl,
-        rawUrl: mediaUrl,
         backupUrl: standalonePlayerUrl,
         type: streamType,
-        priority: 2
+        priority: 1
       });
       customSources.push({
         label: `${label} (Player Dự Phòng)`,
@@ -2850,9 +2837,9 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
         url: standalonePlayerUrl,
         src: standalonePlayerUrl,
         rawUrl: mediaUrl,
-        backupUrl: mediaUrl,
+        backupUrl: fullProxyUrl,
         type: "iframe",
-        priority: 3
+        priority: 2
       });
       customSources.push({
         label: `${label} (Trực tiếp)`,
@@ -2862,7 +2849,7 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
         rawUrl: mediaUrl,
         backupUrl: fullProxyUrl,
         type: streamType,
-        priority: 4
+        priority: 3
       });
     } else {
       allIframes.push(mediaUrl);
@@ -2874,7 +2861,7 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
         src: mediaUrl,
         backupUrl: proxyEmbedUrl,
         type: "iframe",
-        priority: 5
+        priority: 4
       });
       customSources.push({
         label: `${label} (Embed Proxy)`,
@@ -2883,7 +2870,7 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
         src: proxyEmbedUrl,
         backupUrl: mediaUrl,
         type: "iframe",
-        priority: 6
+        priority: 5
       });
     }
   };
@@ -2989,31 +2976,8 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
 }
 
 // =====================================================================
-// HÀM PROXY LUỒNG DỮ LIỆU / HLS SIÊU TỐC (NHÚNG KEY BASE64 TRONG < 2S + BÓC FAKE HEADER)
+// HÀM PROXY LUỒNG DỮ LIỆU / HLS SIÊU TỐC (HỖ TRỢ SEGMENT .HTML CỦA STREAMCAP.STORE)
 // =====================================================================
-function stripFakeTsHeaderServerSide(buffer) {
-  if (!buffer || buffer.byteLength < 564) return buffer;
-  const view = new Uint8Array(buffer);
-  if (view[0] === 0x47 && view[188] === 0x47 && view[376] === 0x47) {
-    return buffer;
-  }
-  const box = String.fromCharCode(view[4], view[5], view[6], view[7]);
-  if (box === "ftyp" || box === "styp" || box === "moof" || box === "sidx") {
-    return buffer;
-  }
-  const maxScan = Math.min(view.length - 376, 4096);
-  for (let i = 1; i < maxScan; i++) {
-    if (
-      view[i] === 0x47 &&
-      view[i + 188] === 0x47 &&
-      view[i + 376] === 0x47
-    ) {
-      return buffer.slice(i);
-    }
-  }
-  return buffer;
-}
-
 function rewriteM3u8Manifest(
   m3u8Text,
   basePlaylistUrl,
@@ -3032,7 +2996,7 @@ function rewriteM3u8Manifest(
           }
           try {
             const abs = new URL(uri, basePlaylistUrl).toString();
-            return `URI="${buildProxyUrl(abs, proxySegments, true)}"`;
+            return `URI="${buildProxyUrl(abs, true, true)}"`;
           } catch (_) {
             return `URI="${uri}"`;
           }
@@ -3048,8 +3012,15 @@ function rewriteM3u8Manifest(
           lowerAbs.includes("/chunklist") ||
           lowerAbs.includes("/index");
 
-        if (isSubPlaylist || proxySegments) {
-          return buildProxyUrl(abs, proxySegments, false);
+        // Bắt buộc proxy mọi phân đoạn của streamcap.store / qmhv3.top (vì có đuôi .html và chặn CORS)
+        if (
+          isSubPlaylist ||
+          proxySegments ||
+          abs.includes("streamcap.") ||
+          abs.includes("qmhv3.") ||
+          lowerAbs.endsWith(".html")
+        ) {
+          return buildProxyUrl(abs, true, false);
         }
         return abs;
       } catch (_) {
@@ -3059,8 +3030,7 @@ function rewriteM3u8Manifest(
     .join("\n");
 }
 
-// Đua song song lấy dữ liệu nhị phân với timeout cực ngắn (2200ms) để không bao giờ treo!
-async function fetchBinaryRace(targetUrl, headers, timeoutMs = 2500) {
+async function fetchBinaryRace(targetUrl, headers, timeoutMs = 3500) {
   const checkValidBinary = async (res) => {
     if (!res.ok && res.status !== 206) throw new Error("status_" + res.status);
     const buf = await res.arrayBuffer();
@@ -3130,28 +3100,33 @@ async function handleRawProxy(req) {
   const proxySegments = sp.get("proxySegments") === "1";
   const isKeyRequest =
     sp.get("isKey") === "1" ||
-    /\.(?:key|bin)(?:\?|$)|\/key(?:\?|$|\/)/i.test(targetUrl || "");
+    /\.(?:key|bin)(?:\?|$)|\/key(?:\?|$|\/)|video-hls-key/i.test(
+      targetUrl || ""
+    );
 
   if (!targetUrl) {
     return new NextResponse("Missing url", { status: 400, headers: CORS });
   }
 
   try {
-    const isQmhTarget =
-      targetUrl.includes("qmhv3.top") || referer.includes("qmhv3.top");
-    let refOrigin = isQmhTarget ? QMH_DOMAIN : DEFAULT_DOMAIN;
-    if (!isQmhTarget) {
+    const isQmhEcosystem =
+      targetUrl.includes("qmhv3.top") ||
+      targetUrl.includes("streamcap.store") ||
+      referer.includes("qmhv3.top");
+
+    let refOrigin = isQmhEcosystem ? QMH_DOMAIN : DEFAULT_DOMAIN;
+    if (!isQmhEcosystem) {
       try {
         refOrigin = new URL(referer).origin;
       } catch (_) {}
     }
 
-    const effectiveReferer = isQmhTarget ? `${QMH_DOMAIN}/` : referer;
+    const effectiveReferer = isQmhEcosystem ? `${QMH_DOMAIN}/` : referer;
     const method = (req.method || "GET").toUpperCase();
     const isMediaStream =
       isKeyRequest ||
-      isQmhTarget ||
-      /\.(?:m3u8|ts|mp4|webm|m4s|key)(?:\?|$)|\/hls\//i.test(targetUrl);
+      isQmhEcosystem ||
+      /\.(?:m3u8|ts|mp4|webm|m4s|key|html)(?:\?|$)|\/hls\//i.test(targetUrl);
 
     const headers = {
       "User-Agent": BROWSER_HEADERS["User-Agent"],
@@ -3159,9 +3134,9 @@ async function handleRawProxy(req) {
       "Accept-Language": BROWSER_HEADERS["Accept-Language"],
       Origin: refOrigin,
       Referer: effectiveReferer,
-      ...(isQmhTarget
+      ...(isQmhEcosystem
         ? {
-            "Sec-Fetch-Site": "same-site",
+            "Sec-Fetch-Site": "cross-site",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Dest": "empty"
           }
@@ -3191,9 +3166,9 @@ async function handleRawProxy(req) {
         cookie ? `&cookie=${encodeURIComponent(cookie)}` : ""
       }`;
 
-    // 1. XỬ LÝ KHÓA GIẢI MÃ AES-128 (< 2.5s)
+    // 1. XỬ LÝ KHÓA GIẢI MÃ AES-128 (`video-hls-key`)
     if (isKeyRequest) {
-      const keyResult = await fetchBinaryRace(targetUrl, headers, 2500);
+      const keyResult = await fetchBinaryRace(targetUrl, headers, 3000);
       if (keyResult && keyResult.buffer) {
         return new NextResponse(keyResult.buffer, {
           status: 200,
@@ -3216,13 +3191,20 @@ async function handleRawProxy(req) {
       lowerTarget.includes("/playlist") ||
       lowerTarget.includes("/master");
 
-    // 2. XỬ LÝ PLAYLIST .M3U8 (ĐUA SONG SONG NHÚNG KEY BASE64 TRONG TỐI ĐA 1.8 GIÂY!)
-    if (isExplicitM3u8) {
-      const fastRes = await fetchFastText(targetUrl, headers, 3000);
+    // Nhận diện chính xác các phân đoạn video (bao gồm cả segment ngụy trang đuôi .html của server1.streamcap.store!)
+    const isDisguisedSegment =
+      lowerTarget.endsWith(".ts") ||
+      lowerTarget.endsWith(".m4s") ||
+      lowerTarget.includes("streamcap.store") ||
+      (lowerTarget.includes("/hls/") && lowerTarget.endsWith(".html"));
+
+    // 2. XỬ LÝ PLAYLIST .M3U8
+    if (isExplicitM3u8 && !isDisguisedSegment) {
+      const fastRes = await fetchFastText(targetUrl, headers, 3200);
       if (fastRes.text && fastRes.text.trim().startsWith("#EXTM3U")) {
         let m3u8Content = fastRes.text;
 
-        // Nếu trong .m3u8 có #EXT-X-KEY, thử đua lấy Key trong đúng 1.8 giây để nhúng thẳng thành data:application/octet-stream;base64,...
+        // Tự động nhúng Key AES-128 dưới dạng Base64 Data URI vào ngay trong file .m3u8
         const keyUriMatches = [
           ...m3u8Content.matchAll(/#EXT-X-KEY[^\r\n]*URI=["']([^"']+)["']/gi)
         ];
@@ -3231,7 +3213,7 @@ async function handleRawProxy(req) {
           if (rawKeyUri && !rawKeyUri.startsWith("data:")) {
             try {
               const absKeyUrl = new URL(rawKeyUri, targetUrl).toString();
-              const keyRes = await fetchBinaryRace(absKeyUrl, headers, 1800);
+              const keyRes = await fetchBinaryRace(absKeyUrl, headers, 2000);
               if (
                 keyRes &&
                 keyRes.buffer &&
@@ -3253,7 +3235,7 @@ async function handleRawProxy(req) {
           m3u8Content,
           targetUrl,
           buildProxyUrl,
-          proxySegments
+          true
         );
         return new NextResponse(rewritten, {
           status: 200,
@@ -3266,7 +3248,8 @@ async function handleRawProxy(req) {
       }
     }
 
-    // 3. XỬ LÝ PHÂN ĐOẠN VIDEO (.TS / .MP4 / DISGUISED SEGMENT)
+    // 3. XỬ LÝ CÁC PHÂN ĐOẠN VIDEO (.TS / .HTML TRÊN STREAMCAP.STORE / .MP4)
+    // QUAN TRỌNG: TUYỆT ĐỐI KHÔNG cắt bất kỳ byte nào của segment (vì segment đang được mã hóa AES-128 CBC, cắt 1 byte sẽ làm hỏng toàn bộ giải mã AES!)
     const fetchOpts = { method, headers };
     if (method !== "GET" && method !== "HEAD") {
       const bodyBuf = await req.arrayBuffer();
@@ -3277,45 +3260,22 @@ async function handleRawProxy(req) {
 
     let upstream = null;
     try {
-      upstream = await fetchWithTimeout(targetUrl, fetchOpts, 4000);
+      upstream = await fetchWithTimeout(targetUrl, fetchOpts, 5000);
     } catch (_) {}
 
-    if (!upstream || (!upstream.ok && upstream.status !== 206)) {
-      const binFallback = await fetchBinaryRace(targetUrl, headers, 3500);
-      if (binFallback && binFallback.buffer) {
-        const cleanedBuf = stripFakeTsHeaderServerSide(binFallback.buffer);
-        return new NextResponse(cleanedBuf, {
-          status: binFallback.status || 200,
-          headers: {
-            ...CORS,
-            "Content-Type": "video/mp2t",
-            "Cache-Control": "public, max-age=3600"
-          }
-        });
-      }
-    }
-
-    if (!upstream) {
-      return new NextResponse("Upstream fetch failed", {
-        status: 502,
-        headers: CORS
-      });
-    }
-
-    const finalTargetUrl = upstream.url || targetUrl;
-    const contentType = (
-      upstream.headers.get("content-type") || ""
-    ).toLowerCase();
-
-    const isPlaylistResponse =
-      contentType.includes("mpegurl") ||
-      (contentType.includes("text/") && !lowerTarget.endsWith(".ts"));
-
-    // Nếu là file .mp4 lớn thì stream trực tiếp
-    if (lowerTarget.endsWith(".mp4") && upstream.body) {
+    // Nếu là phân đoạn video (.ts hoặc .html trên streamcap.store) và tải trực tiếp thành công -> Stream thẳng về trình duyệt ngay lập tức!
+    if (
+      upstream &&
+      (upstream.ok || upstream.status === 206) &&
+      (isDisguisedSegment || lowerTarget.endsWith(".mp4")) &&
+      upstream.body
+    ) {
+      const outType = lowerTarget.endsWith(".mp4")
+        ? "video/mp4"
+        : "video/mp2t";
       const streamHeaders = {
         ...CORS,
-        "Content-Type": "video/mp4",
+        "Content-Type": outType,
         "Cache-Control": "public, max-age=3600"
       };
       const contentRange = upstream.headers.get("content-range");
@@ -3331,35 +3291,55 @@ async function handleRawProxy(req) {
       });
     }
 
-    const buffer = await upstream.arrayBuffer();
-    const firstBytes = Buffer.from(buffer.slice(0, 16))
-      .toString("utf-8")
-      .trim();
-
-    if (firstBytes.startsWith("#EXTM3U") || isPlaylistResponse) {
-      const text = Buffer.from(buffer).toString("utf-8");
-      if (text.trim().startsWith("#EXTM3U")) {
-        const rewritten = rewriteM3u8Manifest(
-          text,
-          finalTargetUrl,
-          buildProxyUrl,
-          proxySegments
-        );
-        return new NextResponse(rewritten, {
-          status: 200,
+    // Nếu gọi trực tiếp bị chặn 403/502, đua qua fetchBinaryRace và giữ nguyên 100% các byte gốc
+    if (!upstream || (!upstream.ok && upstream.status !== 206)) {
+      const binFallback = await fetchBinaryRace(targetUrl, headers, 4500);
+      if (binFallback && binFallback.buffer) {
+        return new NextResponse(binFallback.buffer, {
+          status: binFallback.status || 200,
           headers: {
             ...CORS,
-            "Content-Type": "application/vnd.apple.mpegurl",
-            "Cache-Control": "no-store"
+            "Content-Type": lowerTarget.endsWith(".mp4")
+              ? "video/mp4"
+              : "video/mp2t",
+            "Cache-Control": "public, max-age=3600"
           }
         });
       }
     }
 
-    // Đối với các phân đoạn .ts: tự động bóc bỏ Fake Header (nếu có) trước khi trả về cho Hls.js
-    const cleanedSegment = stripFakeTsHeaderServerSide(buffer);
+    if (!upstream) {
+      return new NextResponse("Upstream fetch failed", {
+        status: 502,
+        headers: CORS
+      });
+    }
 
-    return new NextResponse(cleanedSegment, {
+    const finalTargetUrl = upstream.url || targetUrl;
+    const buffer = await upstream.arrayBuffer();
+    const firstBytes = Buffer.from(buffer.slice(0, 16))
+      .toString("utf-8")
+      .trim();
+
+    if (firstBytes.startsWith("#EXTM3U") && !isDisguisedSegment) {
+      const text = Buffer.from(buffer).toString("utf-8");
+      const rewritten = rewriteM3u8Manifest(
+        text,
+        finalTargetUrl,
+        buildProxyUrl,
+        true
+      );
+      return new NextResponse(rewritten, {
+        status: 200,
+        headers: {
+          ...CORS,
+          "Content-Type": "application/vnd.apple.mpegurl",
+          "Cache-Control": "no-store"
+        }
+      });
+    }
+
+    return new NextResponse(buffer, {
       status: upstream.status,
       headers: {
         ...CORS,
@@ -3406,12 +3386,11 @@ export async function GET(req) {
     return handleRawProxy(req);
   }
 
-  // Trình phát Iframe Dự Phòng Độc Lập cho QMH (Sử dụng Hls.js chuẩn không ghi đè loader gây treo stats)
+  // Trình phát Iframe Dự Phòng Độc Lập cho QMH
   if (sp.get("qmhPlayerProxy") === "1") {
     const targetUrl = sp.get("url") || "";
     const referer = sp.get("referer") || `${QMH_DOMAIN}/`;
     const fullProxyUrl = `/api/videos?rawProxy=1&proxySegments=1&url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(referer)}`;
-    const fastHybridUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(referer)}`;
 
     const playerHtml = `<!DOCTYPE html>
 <html>
@@ -3426,50 +3405,31 @@ export async function GET(req) {
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
 </head>
 <body>
-  <video id="v" controls autoplay playsinline referrerpolicy="no-referrer"></video>
+  <video id="v" controls autoplay muted playsinline referrerpolicy="no-referrer"></video>
   <script>
     (function() {
       var video = document.getElementById("v");
-      var sources = [
-        ${JSON.stringify(fullProxyUrl)},
-        ${JSON.stringify(fastHybridUrl)},
-        ${JSON.stringify(targetUrl)}
-      ];
-      var idx = 0;
-      var hls = null;
+      var src = ${JSON.stringify(fullProxyUrl)};
 
-      function tryPlay() {
-        if (idx >= sources.length) return;
-        var src = sources[idx++];
-        if (hls) {
-          try { hls.destroy(); } catch (e) {}
-          hls = null;
-        }
-        if (window.Hls && Hls.isSupported()) {
-          hls = new Hls({
-            enableWorker: false,
-            lowLatencyMode: false,
-            manifestLoadingTimeOut: 10000,
-            fragLoadingTimeOut: 12000,
-            keyLoadingTimeOut: 8000
-          });
-          hls.loadSource(src);
-          hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, function() {
-            video.play().catch(function(){});
-          });
-          hls.on(Hls.Events.ERROR, function(_, data) {
-            if (data.fatal) {
-              tryPlay();
-            }
-          });
-        } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-          video.src = src;
-          video.onerror = tryPlay;
-          video.play().catch(function(){});
-        }
+      if (window.Hls && Hls.isSupported()) {
+        var hls = new Hls({
+          enableWorker: false,
+          lowLatencyMode: false,
+          manifestLoadingTimeOut: 12000,
+          fragLoadingTimeOut: 15000,
+          keyLoadingTimeOut: 10000
+        });
+        hls.loadSource(src);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, function() {
+          video.play().then(function() {
+            video.muted = false;
+          }).catch(function() {});
+        });
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = src;
+        video.play().catch(function(){});
       }
-      tryPlay();
     })();
   </script>
 </body>
