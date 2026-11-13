@@ -1,78 +1,107 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-// Hàm hỗ trợ tải và đóng gói lại file .m3u8 của api.qmhv3.top ngay trên trình duyệt (vượt chặn IP Vercel & sửa lỗi đường dẫn tương đối)
-async function buildClientBlobM3u8(rawM3u8Url, proxyOrigin = "") {
-  const fetchCandidates = [
-    // 1. Gọi trực tiếp từ trình duyệt người dùng nhưng ẩn Referer
-    () =>
-      fetch(rawM3u8Url, {
-        referrerPolicy: "no-referrer",
-        cache: "no-store"
-      }),
-    // 2. Gọi qua API proxy của mình
-    () =>
-      fetch(
-        `${proxyOrigin}/api/videos?rawProxy=1&proxySegments=1&url=${encodeURIComponent(
-          rawM3u8Url
-        )}&referer=${encodeURIComponent("https://qmhv3.top/")}`,
-        { cache: "no-store" }
-      ),
-    // 3. Gọi qua CORS proxy công cộng
-    () =>
-      fetch(
-        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
-          rawM3u8Url
-        )}`,
-        { cache: "no-store" }
-      )
-  ];
+// Tạo Custom Loader cho Hls.js: Khi tải Key hoặc Segment của qmhv3.top,
+// dùng fetch() với referrerPolicy: "no-referrer" (ẩn hoàn toàn tên miền vercel.app)
+// và đua song song với Proxy để không bao giờ bị lỗi keyLoadError (403)
+function createQmhMultiRouteLoader(HlsClass) {
+  const DefaultLoader = HlsClass.DefaultConfig.loader;
 
-  for (const runFetch of fetchCandidates) {
-    try {
-      const res = await runFetch();
-      if (!res.ok) continue;
-      const text = await res.text();
-      if (!text || !text.trim().startsWith("#EXTM3U")) continue;
+  return class QmhMultiRouteLoader {
+    constructor(config) {
+      this.inner = new DefaultLoader(config);
+      this.aborted = false;
+    }
 
-      // Nếu nội dung đã được rewrite qua /api/videos?rawProxy=1 thì đảm bảo có full origin
-      const rewritten = text
-        .split(/\r?\n/)
-        .map((line) => {
-          const trimmed = line.trim();
-          if (!trimmed) return line;
-          if (trimmed.startsWith("#")) {
-            return line.replace(/URI=["']([^"']+)["']/gi, (_, uri) => {
-              try {
-                if (uri.startsWith("/api/videos?")) {
-                  return `URI="${window.location.origin}${uri}"`;
-                }
-                const abs = new URL(uri, rawM3u8Url).toString();
-                return `URI="${abs}"`;
-              } catch (_) {
-                return `URI="${uri}"`;
-              }
-            });
+    destroy() {
+      this.aborted = true;
+      if (this.inner) this.inner.destroy();
+    }
+
+    abort() {
+      this.aborted = true;
+      if (this.inner) this.inner.abort();
+    }
+
+    load(context, config, callbacks) {
+      const url = context.url || "";
+      const isBinary = context.responseType === "arraybuffer";
+
+      // Áp dụng cho mọi request tải Key giải mã hoặc phân đoạn .ts từ qmhv3.top
+      if (
+        isBinary &&
+        url.includes("qmhv3.top") &&
+        !url.includes("/api/videos?")
+      ) {
+        const startTime = performance.now();
+        const isKey =
+          url.includes(".key") ||
+          url.includes("/key") ||
+          Boolean(context.decryptdata);
+
+        const proxyFallbackUrl = `${
+          window.location.origin
+        }/api/videos?rawProxy=1${
+          isKey ? "&isKey=1" : "&proxySegments=1"
+        }&url=${encodeURIComponent(url)}&referer=${encodeURIComponent(
+          "https://qmhv3.top/"
+        )}`;
+
+        const checkBuffer = async (res) => {
+          if (!res.ok && res.status !== 206) {
+            throw new Error(`HTTP_${res.status}`);
           }
-          if (trimmed.startsWith("/api/videos?")) {
-            return `${window.location.origin}${trimmed}`;
+          const buf = await res.arrayBuffer();
+          if (!buf || buf.byteLength === 0) {
+            throw new Error("EMPTY_BUF");
           }
-          try {
-            return new URL(trimmed, rawM3u8Url).toString();
-          } catch (_) {
-            return line;
-          }
-        })
-        .join("\n");
+          return buf;
+        };
 
-      const blob = new Blob([rewritten], {
-        type: "application/vnd.apple.mpegurl"
-      });
-      return URL.createObjectURL(blob);
-    } catch (_) {}
-  }
-  return null;
+        // Đua song song:
+        // 1. Gọi trực tiếp từ IP máy người dùng nhưng ẩn hoàn toàn Referer (no-referrer)
+        // 2. Gọi qua Proxy của server
+        Promise.any([
+          fetch(url, {
+            referrerPolicy: "no-referrer",
+            mode: "cors",
+            credentials: "omit",
+            cache: "no-store"
+          }).then(checkBuffer),
+          fetch(proxyFallbackUrl, { cache: "no-store" }).then(checkBuffer)
+        ])
+          .then((buf) => {
+            if (this.aborted) return;
+            const now = performance.now();
+            const stats = {
+              aborted: false,
+              loaded: buf.byteLength,
+              total: buf.byteLength,
+              retry: 0,
+              chunkCount: 1,
+              bwEstimate: 0,
+              loading: { start: startTime, first: now, end: now },
+              parsing: { start: now, end: now },
+              buffering: { start: now, first: now, end: now }
+            };
+            callbacks.onSuccess({ url, data: buf }, stats, context, null);
+          })
+          .catch((err) => {
+            if (this.aborted) return;
+            callbacks.onError(
+              { code: 403, text: err?.message || "key_or_frag_blocked" },
+              context,
+              null,
+              {}
+            );
+          });
+        return;
+      }
+
+      this.inner.load(context, config, callbacks);
+    }
+  };
 }
 
 export default function Player({
@@ -85,10 +114,9 @@ export default function Player({
 }) {
   const videoRef = useRef(null);
   const watchdogTimerRef = useRef(null);
-  const blobUrlRef = useRef(null);
+  const hlsRef = useRef(null);
 
   const [activeIdx, setActiveIdx] = useState(0);
-  const [useBackupMode, setUseBackupMode] = useState(false);
   const [autoSwitchedMsg, setAutoSwitchedMsg] = useState("");
   const [showDebug, setShowDebug] = useState(false);
   const [playerErrorLog, setPlayerErrorLog] = useState("");
@@ -129,11 +157,9 @@ export default function Player({
         ]
       : [];
 
+  const sourcesCount = normalizedSources.length;
   const current = normalizedSources[activeIdx] || normalizedSources[0] || null;
-  const primaryUrl = current?.url || current?.src || "";
-  const backupUrl = current?.backupUrl || current?.proxyUrl || "";
-
-  const activeUrl = useBackupMode && backupUrl ? backupUrl : primaryUrl;
+  const activeUrl = current?.url || current?.src || "";
 
   const activeType =
     current?.type === "iframe" ||
@@ -151,73 +177,54 @@ export default function Player({
 
   useEffect(() => {
     setActiveIdx(0);
-    setUseBackupMode(false);
     setAutoSwitchedMsg("");
     setPlayerErrorLog("");
-  }, [video?.slug, fallbackUrl]);
+  }, [video?.slug]);
 
-  useEffect(() => {
-    setUseBackupMode(false);
-  }, [activeIdx]);
-
-  // Chuyển sang Server tiếp theo an toàn (không bị kẹt state cũ)
-  const handleAutoSwitchNext = useCallback(
-    (reason = "") => {
-      if (watchdogTimerRef.current) {
-        clearTimeout(watchdogTimerRef.current);
-        watchdogTimerRef.current = null;
+  const switchNextServer = (reason = "") => {
+    if (watchdogTimerRef.current) {
+      clearTimeout(watchdogTimerRef.current);
+      watchdogTimerRef.current = null;
+    }
+    if (reason) {
+      setPlayerErrorLog(String(reason));
+    }
+    setActiveIdx((prev) => {
+      if (prev + 1 < sourcesCount) {
+        const nextIdx = prev + 1;
+        const nextLabel =
+          normalizedSources[nextIdx]?.label || `Server #${nextIdx + 1}`;
+        setAutoSwitchedMsg(
+          `Đã tự động chuyển sang ${nextLabel}${reason ? ` (${reason})` : ""}.`
+        );
+        return nextIdx;
       }
-      if (reason) {
-        setPlayerErrorLog(String(reason));
-      }
-
-      setActiveIdx((prevIdx) => {
-        if (prevIdx + 1 < normalizedSources.length) {
-          const nextIndex = prevIdx + 1;
-          const nextLabel =
-            normalizedSources[nextIndex]?.label || `Server #${nextIndex + 1}`;
-          setAutoSwitchedMsg(
-            `Đã tự động chuyển sang ${nextLabel} để tối ưu tốc độ phát.`
-          );
-          return nextIndex;
-        }
-        return prevIdx;
-      });
-    },
-    [normalizedSources]
-  );
+      return prev;
+    });
+  };
 
   useEffect(() => {
     if (watchdogTimerRef.current) {
       clearTimeout(watchdogTimerRef.current);
       watchdogTimerRef.current = null;
     }
-    if (blobUrlRef.current) {
-      URL.revokeObjectURL(blobUrlRef.current);
-      blobUrlRef.current = null;
+    if (hlsRef.current) {
+      try {
+        hlsRef.current.destroy();
+      } catch (_) {}
+      hlsRef.current = null;
     }
 
     if (!activeUrl || activeType === "iframe" || !videoRef.current) return;
 
     const el = videoRef.current;
     let isCancelled = false;
-    let hlsInstance = null;
 
     const isHlsStream =
       activeType === "hls" ||
       activeUrl.includes(".m3u8") ||
       activeUrl.includes("rawProxy=1") ||
       activeUrl.includes("hlsProxy=1");
-
-    // Đặt bộ hẹn giờ 9 giây: nếu luồng bị treo ở --:-- quá 9 giây mà chưa tải được metadata thì tự động đổi sang Server kế tiếp
-    const startWatchdog = () => {
-      if (watchdogTimerRef.current) clearTimeout(watchdogTimerRef.current);
-      watchdogTimerRef.current = setTimeout(() => {
-        if (!isCancelled && el && el.readyState < 1 && el.currentTime === 0) {
-          handleAutoSwitchNext("Timeout 9s chờ phản hồi từ máy chủ media");
-        }
-      }, 9000);
-    };
 
     const clearWatchdog = () => {
       if (watchdogTimerRef.current) {
@@ -226,134 +233,126 @@ export default function Player({
       }
     };
 
+    const startWatchdog = () => {
+      clearWatchdog();
+      watchdogTimerRef.current = setTimeout(() => {
+        if (!isCancelled && el && el.readyState < 1 && el.currentTime === 0) {
+          switchNextServer("Quá 12s chưa nhận được khung hình");
+        }
+      }, 12000);
+    };
+
+    el.addEventListener("loadedmetadata", clearWatchdog);
     el.addEventListener("loadeddata", clearWatchdog);
     el.addEventListener("playing", clearWatchdog);
 
+    const resolvedStreamUrl =
+      activeUrl.startsWith("/") && typeof window !== "undefined"
+        ? `${window.location.origin}${activeUrl}`
+        : activeUrl;
+
     if (!isHlsStream) {
       startWatchdog();
-      el.src = activeUrl;
+      el.src = resolvedStreamUrl;
       el.play().catch(() => {});
       return () => {
         isCancelled = true;
         clearWatchdog();
+        el.removeEventListener("loadedmetadata", clearWatchdog);
         el.removeEventListener("loadeddata", clearWatchdog);
         el.removeEventListener("playing", clearWatchdog);
       };
     }
 
-    const startPlayback = async () => {
+    const startHlsPlayback = () => {
+      if (isCancelled || !videoRef.current) return;
       startWatchdog();
 
-      let finalStreamUrl =
-        activeUrl.startsWith("/") && typeof window !== "undefined"
-          ? `${window.location.origin}${activeUrl}`
-          : activeUrl;
-
-      const rawQmhUrl = current?.rawUrl || "";
-      const isDirectQmh =
-        activeUrl.includes("api.qmhv3.top") &&
-        !activeUrl.includes("rawProxy=1");
-
-      // Nếu đang ở chế độ Trực tiếp của QMH, thử tạo Blob M3U8 với no-referrer để không bị chặn bởi Referer vercel.app
-      if (isDirectQmh && rawQmhUrl) {
-        const blobUrl = await buildClientBlobM3u8(
-          rawQmhUrl,
-          window.location.origin
-        );
-        if (isCancelled) return;
-        if (blobUrl) {
-          blobUrlRef.current = blobUrl;
-          finalStreamUrl = blobUrl;
-        }
-      }
-
       if (window.Hls && window.Hls.isSupported()) {
-        hlsInstance = new window.Hls({
-          enableWorker: true,
+        const CustomLoader = createQmhMultiRouteLoader(window.Hls);
+        const hls = new window.Hls({
+          enableWorker: false,
           lowLatencyMode: false,
-          manifestLoadingTimeOut: 8000,
-          manifestLoadingMaxRetry: 1,
-          levelLoadingTimeOut: 8000,
-          levelLoadingMaxRetry: 1,
-          fragLoadingTimeOut: 12000,
+          fLoader: CustomLoader,
+          manifestLoadingTimeOut: 10000,
+          manifestLoadingMaxRetry: 2,
+          levelLoadingTimeOut: 10000,
+          levelLoadingMaxRetry: 2,
+          fragLoadingTimeOut: 15000,
           fragLoadingMaxRetry: 2,
           xhrSetup: (xhr) => {
             xhr.withCredentials = false;
           }
         });
+        hlsRef.current = hls;
 
-        hlsInstance.loadSource(finalStreamUrl);
-        hlsInstance.attachMedia(el);
+        hls.loadSource(resolvedStreamUrl);
+        hls.attachMedia(el);
 
-        hlsInstance.on(window.Hls.Events.MANIFEST_PARSED, () => {
+        hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
           if (isCancelled) return;
           clearWatchdog();
           el.play().catch(() => {});
         });
 
-        hlsInstance.on(window.Hls.Events.ERROR, (_, data) => {
+        hls.on(window.Hls.Events.ERROR, (_, data) => {
           if (isCancelled) return;
           if (data.fatal) {
-            const errDetail = `${data.type || "ERR"}: ${
-              data.details || "unknown"
-            } (${data.response?.code || ""})`;
+            if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+              hls.recoverMediaError();
+              return;
+            }
+            const errCode = data.response?.code
+              ? `(${data.response.code})`
+              : "";
+            const errMsg = `${data.type}: ${data.details} ${errCode}`.trim();
             try {
-              hlsInstance.destroy();
+              hls.destroy();
             } catch (_) {}
-            handleAutoSwitchNext(errDetail);
+            hlsRef.current = null;
+            switchNextServer(errMsg);
           }
         });
       } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
-        // Trên Safari iOS (iPhone/iPad)
-        el.src = finalStreamUrl;
+        el.src = resolvedStreamUrl;
         el.load();
         el.play().catch(() => {});
       }
     };
 
     if (typeof window !== "undefined" && window.Hls) {
-      startPlayback();
+      startHlsPlayback();
     } else if (typeof document !== "undefined") {
-      // Trên Safari iOS nếu không có Hls.js vẫn chạy được bằng Native HLS ngay lập tức, không cần đợi script
-      if (
-        el.canPlayType("application/vnd.apple.mpegurl") &&
-        /iPhone|iPad|iPod/i.test(navigator.userAgent)
-      ) {
-        startPlayback();
+      const existingScript = document.querySelector('script[src*="hls."]');
+      if (existingScript) {
+        existingScript.addEventListener("load", startHlsPlayback, {
+          once: true
+        });
       } else {
-        const existingScript = document.querySelector('script[src*="hls."]');
-        if (existingScript) {
-          existingScript.addEventListener("load", startPlayback, {
-            once: true
-          });
-        } else {
-          const script = document.createElement("script");
-          script.src =
-            "https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js";
-          script.async = true;
-          script.onload = startPlayback;
-          script.onerror = startPlayback;
-          document.head.appendChild(script);
-        }
+        const script = document.createElement("script");
+        script.src =
+          "https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js";
+        script.async = true;
+        script.onload = startHlsPlayback;
+        script.onerror = startHlsPlayback;
+        document.head.appendChild(script);
       }
     }
 
     return () => {
       isCancelled = true;
       clearWatchdog();
+      el.removeEventListener("loadedmetadata", clearWatchdog);
       el.removeEventListener("loadeddata", clearWatchdog);
       el.removeEventListener("playing", clearWatchdog);
-      if (hlsInstance) {
+      if (hlsRef.current) {
         try {
-          hlsInstance.destroy();
+          hlsRef.current.destroy();
         } catch (_) {}
-      }
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
+        hlsRef.current = null;
       }
     };
-  }, [activeUrl, activeType, activeIdx, current?.rawUrl, handleAutoSwitchNext]);
+  }, [activeUrl, activeType]);
 
   if (!activeUrl) {
     return (
@@ -398,13 +397,16 @@ export default function Player({
         ) : (
           <video
             ref={videoRef}
-            key={activeUrl}
             poster={poster || video?.thumbnail}
             controls
             autoPlay
             playsInline
             referrerPolicy="no-referrer"
-            onError={() => handleAutoSwitchNext("Video Element Error")}
+            onError={() => {
+              if (!hlsRef.current) {
+                switchNextServer("Video Element Error");
+              }
+            }}
             className="h-full w-full object-contain"
           />
         )}
@@ -448,7 +450,7 @@ export default function Player({
           {normalizedSources.length > 1 && (
             <button
               type="button"
-              onClick={() => handleAutoSwitchNext("Người dùng bấm Đổi Server")}
+              onClick={() => switchNextServer("Đổi thủ công")}
               className="rounded-xl border border-border bg-sub px-2.5 py-1.5 text-xs font-medium text-primary transition hover:bg-surface"
               title="Bấm nếu server hiện tại tải chậm"
             >
