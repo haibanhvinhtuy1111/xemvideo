@@ -1,822 +1,482 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import VideoCard from "@/components/VideoCard";
-import { getSource } from "@/config/site";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-const MAIN_CATEGORIES = [
-  { name: "Tất cả", slug: "all" },
-  { name: "Phim QMH", slug: "qmh-movie", badge: "Hot" },
-  { name: "Phim Việt mới", slug: "phim-sex-viet-moi" },
-  {
-    name: "Video thành viên",
-    slug: "video-cua-thanh-vien",
-    badge: "Mới"
-  },
-  { name: "Sinh viên", slug: "phim-sex-sinh-vien" },
-  { name: "Teen", slug: "teen" },
-  { name: "Check hàng", slug: "check-hang" },
-  { name: "Camera", slug: "camera" },
-  { name: "BDSM", slug: "bdsm" },
-  { name: "Máy bay", slug: "may-bay-ba-gia" }
-];
-
-const EXTRA_TAGS = [
-  { name: "Clip hot", slug: "tag/clip-sex" },
-  { name: "Bú cu", slug: "tag/bu-cu" },
-  { name: "Bướm non", slug: "tag/buom-non" },
-  { name: "Bướm hồng", slug: "tag/buom-hong" },
-  { name: "Bướm múp", slug: "tag/buom-mup" },
-  { name: "Vú to", slug: "tag/vu-to" },
-  { name: "Chân dài", slug: "tag/chan-dai" },
-  { name: "Tập thể", slug: "tag/choi-tap-the" },
-  { name: "Ngoại tình", slug: "tag/ngoai-tinh" },
-  { name: "Lộ clip", slug: "tag/lo-clip" }
-];
-
-const SORT_OPTIONS = [
-  { id: "latest", label: "Mới nhất" },
-  { id: "views", label: "Lượt xem" },
-  { id: "likes", label: "Lượt thích" },
-  { id: "comments", label: "Bình luận" }
-];
-
-const STATE_STORAGE_KEY = "videosite_browse_state_v1";
-// Đổi key cache sang v8 để xóa sạch cache danh sách ít video cũ
-const CACHE_STORAGE_KEY = "videosite_list_cache_v8";
-const SCROLL_STORAGE_KEY = "videosite_scroll_y_v1";
-
-function buildPagination(currentPage, totalPages) {
-  if (totalPages <= 1) return [1];
-
-  if (totalPages <= 6) {
-    return Array.from({ length: totalPages }, (_, i) => i + 1);
-  }
-
-  const pages = new Set();
-  pages.add(1);
-
-  const startNear = Math.max(1, currentPage - 1);
-  const endNear = Math.min(
-    totalPages,
-    currentPage <= 2 ? 4 : currentPage + 1
-  );
-  for (let p = startNear; p <= endNear; p++) {
-    pages.add(p);
-  }
-
-  if (totalPages > 20) {
-    const baseTen = Math.floor(currentPage / 10) * 10;
-    for (let step = 1; step <= 2; step++) {
-      const milestone = baseTen + step * 10;
-      if (milestone > endNear + 1 && milestone < totalPages) {
-        pages.add(milestone);
-      }
-    }
-  } else {
-    pages.add(totalPages);
-  }
-
-  const sorted = [...pages].sort((a, b) => a - b);
-  const result = [];
-  for (let i = 0; i < sorted.length; i++) {
-    if (i > 0 && sorted[i] - sorted[i - 1] > 1) {
-      result.push("...");
-    }
-    result.push(sorted[i]);
-  }
-  if (sorted[sorted.length - 1] < totalPages) {
-    result.push("...");
-  }
-  return result;
-}
-
-function getInitialBrowseState() {
-  if (typeof window === "undefined") {
-    return { category: "all", page: 1, sortBy: "latest", q: "" };
-  }
-  try {
-    const sp = new URLSearchParams(window.location.search);
-    const hasUrlParams =
-      sp.has("page") || sp.has("category") || sp.has("sort") || sp.has("q");
-
-    if (hasUrlParams) {
-      return {
-        category: sp.get("category") || "all",
-        page: Math.max(1, parseInt(sp.get("page") || "1", 10) || 1),
-        sortBy: sp.get("sort") || "latest",
-        q: sp.get("q") || ""
-      };
-    }
-
-    const saved = sessionStorage.getItem(STATE_STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      return {
-        category: parsed.category || "all",
-        page: Math.max(1, parseInt(parsed.page || "1", 10) || 1),
-        sortBy: parsed.sortBy || "latest",
-        q: parsed.q || ""
-      };
-    }
-  } catch (_) {}
-
-  return { category: "all", page: 1, sortBy: "latest", q: "" };
-}
-
-// Hàm dự phòng bóc tách trực tiếp danh sách phim QMH từ trình duyệt nếu IP Vercel bị chặn
-async function fetchQmhClientSideFallback(page = 1, q = "") {
-  const targetPageUrl = `https://qmhv3.top/?tab=movie&category=movie${
-    page > 1 ? `&page=${page}` : ""
-  }${q ? `&q=${encodeURIComponent(q)}` : ""}`;
-
-  const proxyUrls = [
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetPageUrl)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetPageUrl)}`
+// Hàm tải và đóng gói lại file .m3u8 ngay trên trình duyệt (chỉ dùng cho Hls.js, không dùng cho Native Video của iOS)
+async function buildClientBlobM3u8(rawM3u8Url, proxyOrigin = "") {
+  const fetchCandidates = [
+    () =>
+      fetch(
+        `${proxyOrigin}/api/videos?rawProxy=1&proxySegments=1&url=${encodeURIComponent(
+          rawM3u8Url
+        )}&referer=${encodeURIComponent("https://qmhv3.top/")}`,
+        { cache: "no-store" }
+      ),
+    () =>
+      fetch(rawM3u8Url, {
+        referrerPolicy: "no-referrer",
+        cache: "no-store"
+      }),
+    () =>
+      fetch(
+        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
+          rawM3u8Url
+        )}`,
+        { cache: "no-store" }
+      )
   ];
 
-  for (const url of proxyUrls) {
+  for (const runFetch of fetchCandidates) {
     try {
-      const res = await fetch(url, { cache: "no-store" });
+      const res = await runFetch();
       if (!res.ok) continue;
-      let text = await res.text();
-      if (!text || text.length < 200) continue;
+      const text = await res.text();
+      if (!text || !text.trim().startsWith("#EXTM3U")) continue;
 
-      for (let i = 0; i < 2; i++) {
-        text = text.replace(/\\"/g, '"').replace(/\\\//g, "/");
-      }
-
-      const items = [];
-      const seen = new Set();
-      const slugRegex = /"slug"\s*:\s*"([a-zA-Z0-9_-]{5,140})"/g;
-      let m;
-      while ((m = slugRegex.exec(text)) !== null) {
-        const s = m[1];
-        if (seen.has(s) || /banner|casino|crash|dice|slots|idol-live/i.test(s)) {
-          continue;
-        }
-        const chunk = text.slice(
-          Math.max(0, m.index - 500),
-          Math.min(text.length, m.index + 900)
-        );
-        const titleM = chunk.match(/"(?:title|name)"\s*:\s*"([^"]{3,220})"/i);
-        const thumbM = chunk.match(
-          /"(?:thumbnail|thumb|poster|image|cover)"\s*:\s*"([^"]{5,400})"/i
-        );
-        if (titleM && thumbM) {
-          let img = thumbM[1];
-          if (img.startsWith("/")) img = `https://qmhv3.top${img}`;
-          if (!img.startsWith("http") || /logo|banner|favicon/i.test(img)) {
-            continue;
+      const rewritten = text
+        .split(/\r?\n/)
+        .map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return line;
+          if (trimmed.startsWith("#")) {
+            return line.replace(/URI=["']([^"']+)["']/gi, (_, uri) => {
+              try {
+                if (uri.startsWith("/api/videos?")) {
+                  return `URI="${window.location.origin}${uri}"`;
+                }
+                const abs = new URL(uri, rawM3u8Url).toString();
+                return `URI="${abs}"`;
+              } catch (_) {
+                return `URI="${uri}"`;
+              }
+            });
           }
-          seen.add(s);
-          const fullSlug = `qmh__${s}`;
-          items.push({
-            id: fullSlug,
-            slug: fullSlug,
-            title: titleM[1],
-            category: "qmh-movie",
-            thumbnail: img,
-            thumb: img,
-            poster: img,
-            image: img,
-            views: "0",
-            comments: "0",
-            likes: "0"
-          });
-        }
-      }
+          if (trimmed.startsWith("/api/videos?")) {
+            return `${window.location.origin}${trimmed}`;
+          }
+          try {
+            return new URL(trimmed, rawM3u8Url).toString();
+          } catch (_) {
+            return line;
+          }
+        })
+        .join("\n");
 
-      if (items.length > 0) {
-        return { items, totalPages: page + 5 };
-      }
+      const blob = new Blob([rewritten], {
+        type: "application/vnd.apple.mpegurl"
+      });
+      return URL.createObjectURL(blob);
     } catch (_) {}
   }
   return null;
 }
 
-export default function HomePage() {
-  const [ready, setReady] = useState(false);
-  const [category, setCategory] = useState("all");
-  const [sortBy, setSortBy] = useState("latest");
-  const [q, setQ] = useState("");
-  const [searchInput, setSearchInput] = useState("");
-  const [page, setPage] = useState(1);
+export default function Player({
+  video,
+  src,
+  url,
+  type,
+  poster,
+  sources: propSources
+}) {
+  const videoRef = useRef(null);
+  const watchdogTimerRef = useRef(null);
+  const blobUrlRef = useRef(null);
 
-  const [items, setItems] = useState([]);
-  const [totalPages, setTotalPages] = useState(1);
-  const [dynamicCats, setDynamicCats] = useState([]);
-  const [listDebug, setListDebug] = useState(null);
-  const [sortOpen, setSortOpen] = useState(false);
-  const [showMoreTags, setShowMoreTags] = useState(false);
-  const [jumpPageInput, setJumpPageInput] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [useBackupMode, setUseBackupMode] = useState(false);
+  const [autoSwitchedMsg, setAutoSwitchedMsg] = useState("");
+  const [showDebug, setShowDebug] = useState(false);
+  const [playerErrorLog, setPlayerErrorLog] = useState("");
 
-  const sortDropdownRef = useRef(null);
-  const shouldScrollTopRef = useRef(false);
-  const pendingRestoreScrollRef = useRef(false);
+  const rawSources = propSources || video?.sources || [];
+
+  const fallbackUrl =
+    src ||
+    url ||
+    video?.videoUrl ||
+    video?.hlsUrl ||
+    video?.mp4Url ||
+    video?.embedUrl ||
+    video?.iframe ||
+    video?.url ||
+    video?.src ||
+    "";
+
+  const normalizedSources =
+    rawSources.length > 0
+      ? rawSources
+      : fallbackUrl
+      ? [
+          {
+            label: "Server #1",
+            url: fallbackUrl,
+            type:
+              type ||
+              video?.type ||
+              (fallbackUrl.includes(".m3u8") ||
+              fallbackUrl.includes("rawProxy=1") ||
+              fallbackUrl.includes("hlsProxy=1")
+                ? "hls"
+                : fallbackUrl.includes(".mp4")
+                ? "mp4"
+                : "iframe")
+          }
+        ]
+      : [];
+
+  const current = normalizedSources[activeIdx] || normalizedSources[0] || null;
+  const primaryUrl = current?.url || current?.src || "";
+  const backupUrl = current?.backupUrl || current?.proxyUrl || "";
+
+  const activeUrl = useBackupMode && backupUrl ? backupUrl : primaryUrl;
+
+  const activeType =
+    current?.type === "iframe" ||
+    activeUrl.includes("embedProxy=1") ||
+    activeUrl.includes("qmhPlayerProxy=1")
+      ? "iframe"
+      : current?.type ||
+        (activeUrl.includes(".m3u8") ||
+        activeUrl.includes("rawProxy=1") ||
+        activeUrl.includes("hlsProxy=1")
+          ? "hls"
+          : activeUrl.includes(".mp4")
+          ? "mp4"
+          : "iframe");
 
   useEffect(() => {
-    const init = getInitialBrowseState();
-    setCategory(init.category);
-    setPage(init.page);
-    setSortBy(init.sortBy);
-    setQ(init.q);
-    setSearchInput(init.q);
-    pendingRestoreScrollRef.current = true;
-    setReady(true);
+    setActiveIdx(0);
+    setUseBackupMode(false);
+    setAutoSwitchedMsg("");
+    setPlayerErrorLog("");
+  }, [video?.slug, fallbackUrl]);
 
-    const handlePopState = () => {
-      const st = getInitialBrowseState();
-      setCategory(st.category);
-      setPage(st.page);
-      setSortBy(st.sortBy);
-      setQ(st.q);
-      setSearchInput(st.q);
-      pendingRestoreScrollRef.current = true;
+  useEffect(() => {
+    setUseBackupMode(false);
+  }, [activeIdx]);
+
+  const handleAutoSwitchNext = useCallback(
+    (reason = "") => {
+      if (watchdogTimerRef.current) {
+        clearTimeout(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
+      if (reason) {
+        setPlayerErrorLog(String(reason));
+      }
+
+      setActiveIdx((prevIdx) => {
+        if (prevIdx + 1 < normalizedSources.length) {
+          const nextIndex = prevIdx + 1;
+          const nextLabel =
+            normalizedSources[nextIndex]?.label || `Server #${nextIndex + 1}`;
+          setAutoSwitchedMsg(
+            `Đã tự động chuyển sang ${nextLabel} (${reason || "tối ưu luồng"}).`
+          );
+          return nextIndex;
+        }
+        return prevIdx;
+      });
+    },
+    [normalizedSources]
+  );
+
+  useEffect(() => {
+    if (watchdogTimerRef.current) {
+      clearTimeout(watchdogTimerRef.current);
+      watchdogTimerRef.current = null;
+    }
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
+    }
+
+    if (!activeUrl || activeType === "iframe" || !videoRef.current) return;
+
+    const el = videoRef.current;
+    let isCancelled = false;
+    let hlsInstance = null;
+
+    const isHlsStream =
+      activeType === "hls" ||
+      activeUrl.includes(".m3u8") ||
+      activeUrl.includes("rawProxy=1") ||
+      activeUrl.includes("hlsProxy=1");
+
+    const startWatchdog = () => {
+      if (watchdogTimerRef.current) clearTimeout(watchdogTimerRef.current);
+      watchdogTimerRef.current = setTimeout(() => {
+        if (!isCancelled && el && el.readyState < 1 && el.currentTime === 0) {
+          handleAutoSwitchNext("Quá 8s chưa nhận được khung hình");
+        }
+      }, 8000);
     };
-    window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const onScroll = () => {
-      if (!loading && window.scrollY > 0) {
+    const clearWatchdog = () => {
+      if (watchdogTimerRef.current) {
+        clearTimeout(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
+    };
+
+    el.addEventListener("loadeddata", clearWatchdog);
+    el.addEventListener("playing", clearWatchdog);
+
+    if (!isHlsStream) {
+      startWatchdog();
+      el.src = activeUrl;
+      el.play().catch(() => {});
+      return () => {
+        isCancelled = true;
+        clearWatchdog();
+        el.removeEventListener("loadeddata", clearWatchdog);
+        el.removeEventListener("playing", clearWatchdog);
+      };
+    }
+
+    const startPlayback = async () => {
+      startWatchdog();
+
+      let finalStreamUrl =
+        activeUrl.startsWith("/") && typeof window !== "undefined"
+          ? `${window.location.origin}${activeUrl}`
+          : activeUrl;
+
+      const canUseHlsJs = Boolean(window.Hls && window.Hls.isSupported());
+      const rawQmhUrl = current?.rawUrl || "";
+      const isDirectQmh =
+        activeUrl.includes("api.qmhv3.top") &&
+        !activeUrl.includes("rawProxy=1");
+
+      // CHỈ dùng Blob URL khi chạy bằng Hls.js (vì Native HLS của Safari iOS không đọc được blob: URL!)
+      if (canUseHlsJs && isDirectQmh && rawQmhUrl) {
+        const blobUrl = await buildClientBlobM3u8(
+          rawQmhUrl,
+          window.location.origin
+        );
+        if (isCancelled) return;
+        if (blobUrl) {
+          blobUrlRef.current = blobUrl;
+          finalStreamUrl = blobUrl;
+        }
+      }
+
+      if (canUseHlsJs) {
+        hlsInstance = new window.Hls({
+          // Tắt enableWorker để không bị Brave Shields hoặc CSP chặn Web Worker khi đọc Blob/Proxy
+          enableWorker: false,
+          lowLatencyMode: false,
+          manifestLoadingTimeOut: 8000,
+          manifestLoadingMaxRetry: 1,
+          levelLoadingTimeOut: 8000,
+          levelLoadingMaxRetry: 1,
+          fragLoadingTimeOut: 12000,
+          fragLoadingMaxRetry: 2,
+          xhrSetup: (xhr) => {
+            xhr.withCredentials = false;
+          }
+        });
+
+        hlsInstance.loadSource(finalStreamUrl);
+        hlsInstance.attachMedia(el);
+
+        hlsInstance.on(window.Hls.Events.MANIFEST_PARSED, () => {
+          if (isCancelled) return;
+          clearWatchdog();
+          el.play().catch(() => {});
+        });
+
+        hlsInstance.on(window.Hls.Events.ERROR, (_, data) => {
+          if (isCancelled) return;
+          if (data.fatal) {
+            const errDetail = `${data.type || "ERR"}: ${
+              data.details || "unknown"
+            } (${data.response?.code || ""})`;
+            try {
+              hlsInstance.destroy();
+            } catch (_) {}
+            handleAutoSwitchNext(errDetail);
+          }
+        });
+      } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
+        // Trên Safari iPhone: luôn truyền URL http/https thật (không truyền blob:)
+        el.src = finalStreamUrl;
+        el.load();
+        el.play().catch(() => {});
+      }
+    };
+
+    if (typeof window !== "undefined" && window.Hls) {
+      startPlayback();
+    } else if (typeof document !== "undefined") {
+      const existingScript = document.querySelector('script[src*="hls."]');
+      if (existingScript) {
+        existingScript.addEventListener("load", startPlayback, {
+          once: true
+        });
+      } else {
+        const script = document.createElement("script");
+        script.src =
+          "https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js";
+        script.async = true;
+        script.onload = startPlayback;
+        script.onerror = startPlayback;
+        document.head.appendChild(script);
+      }
+    }
+
+    return () => {
+      isCancelled = true;
+      clearWatchdog();
+      el.removeEventListener("loadeddata", clearWatchdog);
+      el.removeEventListener("playing", clearWatchdog);
+      if (hlsInstance) {
         try {
-          sessionStorage.setItem(SCROLL_STORAGE_KEY, String(window.scrollY));
+          hlsInstance.destroy();
         } catch (_) {}
       }
-    };
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, [loading]);
-
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (
-        sortDropdownRef.current &&
-        !sortDropdownRef.current.contains(e.target)
-      ) {
-        setSortOpen(false);
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
       }
     };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  }, [activeUrl, activeType, activeIdx, current?.rawUrl, handleAutoSwitchNext]);
 
-  useEffect(() => {
-    if (!ready) return;
-    let isMounted = true;
-
-    const savedSource = typeof getSource === "function" ? getSource() : "";
-    const stateObj = { category, page, sortBy, q, domain: savedSource };
-    const cacheKey = JSON.stringify(stateObj);
-
-    try {
-      sessionStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(stateObj));
-      const urlParams = new URLSearchParams();
-      if (category && category !== "all") urlParams.set("category", category);
-      if (page > 1) urlParams.set("page", String(page));
-      if (sortBy && sortBy !== "latest") urlParams.set("sort", sortBy);
-      if (q) urlParams.set("q", q);
-
-      const newQuery = urlParams.toString();
-      const targetUrl = newQuery ? `/?${newQuery}` : "/";
-      if (window.location.pathname + window.location.search !== targetUrl) {
-        window.history.replaceState(null, "", targetUrl);
-      }
-    } catch (_) {}
-
-    async function loadList() {
-      try {
-        const rawCache = sessionStorage.getItem(CACHE_STORAGE_KEY);
-        if (rawCache) {
-          const parsedCache = JSON.parse(rawCache);
-          const minValidItems = category === "qmh-movie" ? 8 : 1;
-          if (
-            parsedCache.key === cacheKey &&
-            Array.isArray(parsedCache.items) &&
-            parsedCache.items.length >= minValidItems &&
-            Date.now() - (parsedCache.ts || 0) < 5 * 60 * 1000
-          ) {
-            setItems(parsedCache.items);
-            setTotalPages(parsedCache.totalPages || 1);
-            if (Array.isArray(parsedCache.categories)) {
-              setDynamicCats(parsedCache.categories);
-            }
-            setLoading(false);
-
-            if (pendingRestoreScrollRef.current) {
-              pendingRestoreScrollRef.current = false;
-              const savedY = parseInt(
-                sessionStorage.getItem(SCROLL_STORAGE_KEY) || "0",
-                10
-              );
-              if (savedY > 0) {
-                setTimeout(() => {
-                  window.scrollTo({ top: savedY, behavior: "instant" });
-                }, 30);
-              }
-            }
-            return;
-          }
-        }
-      } catch (_) {}
-
-      setLoading(true);
-      setListDebug(null);
-      if (shouldScrollTopRef.current) {
-        shouldScrollTopRef.current = false;
-        window.scrollTo({ top: 0, behavior: "smooth" });
-      }
-
-      try {
-        const params = new URLSearchParams({
-          category,
-          page: String(page),
-          sort: sortBy
-        });
-        if (q) params.set("q", q);
-        if (savedSource) params.set("domain", savedSource);
-
-        const res = await fetch(`/api/videos?${params.toString()}`, {
-          cache: "no-store"
-        });
-        const data = await res.json();
-
-        if (!isMounted) return;
-
-        let loadedItems = Array.isArray(data?.items) ? data.items : [];
-        let loadedTotalPages = Math.max(1, Number(data?.totalPages) || 1);
-        const loadedCats = Array.isArray(data?.categories)
-          ? data.categories
-          : [];
-
-        if (data?._debug) {
-          setListDebug(data._debug);
-        }
-
-        if (category === "qmh-movie" && loadedItems.length < 5) {
-          const clientFallback = await fetchQmhClientSideFallback(page, q);
-          if (
-            clientFallback &&
-            clientFallback.items.length > loadedItems.length
-          ) {
-            loadedItems = clientFallback.items;
-            loadedTotalPages = clientFallback.totalPages;
-          }
-        }
-
-        setItems(loadedItems);
-        setTotalPages(loadedTotalPages);
-        if (loadedCats.length > 0) {
-          setDynamicCats(loadedCats);
-        }
-
-        if (loadedItems.length > 0) {
-          try {
-            sessionStorage.setItem(
-              CACHE_STORAGE_KEY,
-              JSON.stringify({
-                key: cacheKey,
-                items: loadedItems,
-                totalPages: loadedTotalPages,
-                categories: loadedCats,
-                ts: Date.now()
-              })
-            );
-          } catch (_) {}
-        }
-      } catch (_) {
-        if (isMounted) setItems([]);
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-          if (pendingRestoreScrollRef.current) {
-            pendingRestoreScrollRef.current = false;
-            const savedY = parseInt(
-              sessionStorage.getItem(SCROLL_STORAGE_KEY) || "0",
-              10
-            );
-            if (savedY > 0) {
-              setTimeout(() => {
-                window.scrollTo({ top: savedY, behavior: "instant" });
-              }, 50);
-            }
-          }
-        }
-      }
-    }
-
-    loadList();
-    return () => {
-      isMounted = false;
-    };
-  }, [ready, category, q, page, sortBy]);
-
-  const changePage = (newPage) => {
-    const target = Math.max(1, Math.min(totalPages, Number(newPage) || 1));
-    if (target === page) return;
-    shouldScrollTopRef.current = true;
-    pendingRestoreScrollRef.current = false;
-    try {
-      sessionStorage.setItem(SCROLL_STORAGE_KEY, "0");
-    } catch (_) {}
-    setPage(target);
-  };
-
-  const handleSelectCategory = (slug) => {
-    shouldScrollTopRef.current = true;
-    pendingRestoreScrollRef.current = false;
-    try {
-      sessionStorage.setItem(SCROLL_STORAGE_KEY, "0");
-      sessionStorage.removeItem(CACHE_STORAGE_KEY);
-    } catch (_) {}
-    setCategory(slug);
-    setQ("");
-    setSearchInput("");
-    setPage(1);
-    setShowMoreTags(false);
-  };
-
-  const handleSearchSubmit = (e) => {
-    e.preventDefault();
-    shouldScrollTopRef.current = true;
-    pendingRestoreScrollRef.current = false;
-    try {
-      sessionStorage.setItem(SCROLL_STORAGE_KEY, "0");
-    } catch (_) {}
-    setQ(searchInput.trim());
-    setPage(1);
-  };
-
-  const handleJumpPage = (e) => {
-    e.preventDefault();
-    const target = parseInt(jumpPageInput, 10);
-    if (!isNaN(target) && target >= 1 && target <= totalPages) {
-      changePage(target);
-      setJumpPageInput("");
-    }
-  };
-
-  const mainSlugs = new Set(MAIN_CATEGORIES.map((c) => c.slug));
-  const mergedExtraTags = [...EXTRA_TAGS];
-  for (const dc of dynamicCats) {
-    const cleanDc = dc.slug.replace(/^category\//, "");
-    if (
-      !mainSlugs.has(cleanDc) &&
-      !mergedExtraTags.some((t) => t.slug === dc.slug)
-    ) {
-      mergedExtraTags.push(dc);
-    }
+  if (!activeUrl) {
+    return (
+      <div className="space-y-3 rounded-2xl border border-border bg-surface p-6 text-textSub shadow-sm">
+        <p className="text-sm">
+          Video này hiện không có luồng phát khả dụng hoặc đã bị xóa trên máy
+          chủ nguồn.
+        </p>
+        {video?.postLink && (
+          <a
+            href={video.postLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition hover:bg-primary-hover"
+          >
+            <span>Kiểm tra trên trang gốc</span>
+            <span>↗</span>
+          </a>
+        )}
+      </div>
+    );
   }
 
-  const pageTokens = buildPagination(page, totalPages);
-  const currentSortLabel =
-    SORT_OPTIONS.find((o) => o.id === sortBy)?.label || "Mới nhất";
+  const isLocalProxyIframe = activeUrl.startsWith("/");
 
   return (
-    <div className="min-h-screen bg-background text-textMain">
-      {/* Thanh điều hướng dính (Sticky) */}
-      <div className="sticky top-0 z-20 border-b border-border bg-surface/90 backdrop-blur-md">
-        <div className="mx-auto max-w-6xl space-y-2.5 px-3 py-2.5 sm:px-4 sm:py-3.5">
-          {/* Ô tìm kiếm */}
-          <form
-            onSubmit={handleSearchSubmit}
-            className="mx-auto flex max-w-lg items-center rounded-full border border-border bg-sub px-3.5 py-1.5 transition-all focus-within:border-primary focus-within:ring-1 focus-within:ring-primary"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 20 20"
-              fill="currentColor"
-              className="mr-2 h-4 w-4 shrink-0 text-textSub"
-            >
-              <path
-                fillRule="evenodd"
-                d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z"
-                clipRule="evenodd"
-              />
-            </svg>
-            <input
-              type="text"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Tìm kiếm video..."
-              className="w-full bg-transparent text-base text-textMain placeholder:text-textSub outline-none sm:text-sm"
-            />
-            {searchInput && (
+    <div className="space-y-3.5">
+      {/* Khung phát Video / Iframe */}
+      <div className="relative aspect-video w-full overflow-hidden rounded-xl border border-border bg-black shadow-xl shadow-black/25 sm:rounded-2xl">
+        {activeType === "iframe" ? (
+          <iframe
+            key={activeUrl}
+            src={activeUrl}
+            scrolling="no"
+            className="h-full w-full border-0 overflow-hidden"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+            allowFullScreen
+            referrerPolicy={
+              isLocalProxyIframe ? "same-origin" : "no-referrer"
+            }
+          />
+        ) : (
+          <video
+            ref={videoRef}
+            key={activeUrl}
+            poster={poster || video?.thumbnail}
+            controls
+            autoPlay
+            playsInline
+            referrerPolicy="no-referrer"
+            onError={() => handleAutoSwitchNext("Video Element Error")}
+            className="h-full w-full object-contain"
+          />
+        )}
+      </div>
+
+      {/* Thông báo tự động đổi server */}
+      {autoSwitchedMsg && (
+        <p className="rounded-xl border border-hot/30 bg-hot-bg px-3.5 py-2 text-xs font-medium text-hot">
+          ⚡ {autoSwitchedMsg}
+        </p>
+      )}
+
+      {/* Hàng nút chọn Server & Nút chuyển nhanh */}
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+          <span className="mr-1 hidden text-xs font-medium text-textSub sm:inline">
+            Máy chủ:
+          </span>
+          {normalizedSources.map((s, idx) => {
+            const isActive = activeIdx === idx;
+            return (
               <button
+                key={idx}
                 type="button"
                 onClick={() => {
-                  setSearchInput("");
-                  if (q) {
-                    shouldScrollTopRef.current = true;
-                    setQ("");
-                    setPage(1);
-                  }
+                  setAutoSwitchedMsg("");
+                  setPlayerErrorLog("");
+                  setActiveIdx(idx);
                 }}
-                className="px-2 text-xs text-textSub transition-colors hover:text-textMain"
-              >
-                ✕
-              </button>
-            )}
-            <button
-              type="submit"
-              className="ml-1 shrink-0 rounded-full bg-primary-light px-3.5 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary hover:text-primary-foreground"
-            >
-              Tìm
-            </button>
-          </form>
-
-          {/* Thanh danh mục vuốt ngang trên mobile */}
-          <nav className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:flex-wrap sm:justify-center sm:pb-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            {MAIN_CATEGORIES.map((cat) => {
-              const isActive = !q && category === cat.slug;
-              return (
-                <button
-                  key={cat.slug}
-                  type="button"
-                  onClick={() => handleSelectCategory(cat.slug)}
-                  className={`flex shrink-0 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition-all sm:text-[13px] ${
-                    isActive
-                      ? "bg-primary text-primary-foreground shadow-sm shadow-primary/25"
-                      : "border border-border bg-sub text-textMain hover:border-primary/40 hover:bg-surface"
-                  }`}
-                >
-                  <span>{cat.name}</span>
-                  {cat.badge && (
-                    <span
-                      className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none ${
-                        isActive
-                          ? "bg-black/20 text-primary-foreground"
-                          : "bg-hot-bg text-hot"
-                      }`}
-                    >
-                      {cat.badge}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-
-            <button
-              type="button"
-              onClick={() => setShowMoreTags(!showMoreTags)}
-              title="Xem thêm thẻ"
-              className={`shrink-0 rounded-full border px-3 py-1.5 text-xs font-semibold transition-all ${
-                showMoreTags
-                  ? "border-primary/40 bg-primary-light text-primary"
-                  : "border-border bg-sub text-textSub hover:bg-surface hover:text-textMain"
-              }`}
-            >
-              •••
-            </button>
-          </nav>
-
-          {showMoreTags && (
-            <div className="flex max-h-40 flex-wrap items-center justify-center gap-1.5 overflow-y-auto border-t border-border pb-1 pt-2">
-              {mergedExtraTags.map((tag) => {
-                const isActive = !q && category === tag.slug;
-                return (
-                  <button
-                    key={tag.slug}
-                    type="button"
-                    onClick={() => handleSelectCategory(tag.slug)}
-                    className={`rounded-full px-2.5 py-1 text-xs transition ${
-                      isActive
-                        ? "bg-primary font-medium text-primary-foreground"
-                        : "border border-border bg-sub text-textSub hover:bg-surface hover:text-textMain"
-                    }`}
-                  >
-                    #{tag.name}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Khu vực danh sách Video */}
-      <div className="mx-auto max-w-6xl px-3 py-4 sm:px-4 sm:py-6">
-        <div className="mb-4 flex items-center justify-between gap-2 sm:mb-6">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="inline-block h-5 w-1.5 shrink-0 rounded-full bg-primary" />
-            <h2 className="truncate text-sm font-semibold text-textMain sm:text-lg">
-              {q
-                ? `Tìm kiếm: "${q}"`
-                : MAIN_CATEGORIES.find((c) => c.slug === category)?.name ||
-                  mergedExtraTags.find((t) => t.slug === category)?.name ||
-                  category.replace(/^tag\/|^category\//, "#")}
-            </h2>
-            <span className="shrink-0 text-[11px] text-textSub sm:text-xs">
-              (Trang {page}/{totalPages})
-            </span>
-          </div>
-
-          {/* Menu Sắp xếp theo */}
-          <div className="relative shrink-0" ref={sortDropdownRef}>
-            <button
-              type="button"
-              onClick={() => setSortOpen(!sortOpen)}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-2.5 py-1.5 text-xs text-textSub transition hover:bg-sub sm:px-3.5 sm:py-2"
-            >
-              <span className="hidden text-textSub sm:inline">
-                Sắp xếp theo
-              </span>
-              <span className="font-semibold text-textMain">
-                {currentSortLabel}
-              </span>
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-                className={`h-3.5 w-3.5 text-textSub transition-transform duration-200 ${
-                  sortOpen ? "rotate-180" : ""
+                className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition-all ${
+                  isActive
+                    ? "bg-primary text-primary-foreground shadow-sm shadow-primary/30"
+                    : "border border-border bg-sub text-textMain hover:bg-surface"
                 }`}
               >
-                <path
-                  fillRule="evenodd"
-                  d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
-                  clipRule="evenodd"
-                />
-              </svg>
-            </button>
+                {s.label || s.name || `Server #${idx + 1}`}
+              </button>
+            );
+          })}
 
-            {sortOpen && (
-              <div className="absolute right-0 z-30 mt-1.5 w-40 rounded-xl border border-border bg-surface py-1.5 shadow-xl">
-                {SORT_OPTIONS.map((opt) => {
-                  const active = sortBy === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => {
-                        shouldScrollTopRef.current = true;
-                        try {
-                          sessionStorage.removeItem(CACHE_STORAGE_KEY);
-                        } catch (_) {}
-                        setSortBy(opt.id);
-                        setSortOpen(false);
-                        setPage(1);
-                      }}
-                      className={`flex w-full items-center justify-between px-3.5 py-2 text-left text-xs transition-colors sm:text-sm ${
-                        active
-                          ? "bg-primary-light font-semibold text-primary"
-                          : "text-textMain hover:bg-sub"
-                      }`}
-                    >
-                      <span>{opt.label}</span>
-                      {active && (
-                        <span className="h-1.5 w-1.5 rounded-full bg-primary" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Lưới Video */}
-        {loading ? (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 sm:gap-5 md:grid-cols-3 lg:grid-cols-4">
-            {Array.from({ length: 12 }).map((_, i) => (
-              <div
-                key={i}
-                className="animate-pulse overflow-hidden rounded-2xl border border-border bg-surface"
-              >
-                <div className="aspect-video w-full bg-sub" />
-                <div className="space-y-2 p-2.5 sm:p-3.5">
-                  <div className="h-3 w-11/12 rounded bg-sub" />
-                  <div className="h-3 w-2/3 rounded bg-sub" />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : items.length === 0 ? (
-          <div className="space-y-3 rounded-2xl border border-border bg-surface p-10 text-center shadow-sm">
-            <p className="text-sm text-textSub">
-              Không tìm thấy video nào trong mục này.
-            </p>
+          {normalizedSources.length > 1 && (
             <button
               type="button"
-              onClick={() => handleSelectCategory("all")}
-              className="rounded-full bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition hover:bg-primary-hover"
+              onClick={() => handleAutoSwitchNext("Người dùng bấm Đổi Server")}
+              className="rounded-xl border border-border bg-sub px-2.5 py-1.5 text-xs font-medium text-primary transition hover:bg-surface"
+              title="Bấm nếu server hiện tại tải chậm"
             >
-              Về trang tất cả
+              Đổi Server ↻
             </button>
-            {listDebug && (
-              <pre className="mt-4 max-h-48 overflow-auto rounded-lg bg-black/50 p-3 text-left font-mono text-[11px] text-slate-400 whitespace-pre-wrap">
-                {JSON.stringify(listDebug, null, 2)}
-              </pre>
-            )}
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 sm:gap-5 md:grid-cols-3 lg:grid-cols-4">
-            {items.map((item, idx) => (
-              <VideoCard key={item.slug || item.id || idx} video={item} />
-            ))}
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* Thanh phân trang rút gọn chuẩn */}
-        {!loading && items.length > 0 && totalPages > 1 && (
-          <div className="mt-10 flex flex-col items-center gap-4 border-t border-border pt-6">
-            <div className="flex flex-wrap items-center justify-center gap-1.5">
-              <span className="rounded-lg border border-border bg-sub px-2.5 py-1.5 text-xs font-medium text-textSub">
-                Page {page.toLocaleString("en-US")} of{" "}
-                {totalPages.toLocaleString("en-US")}
-              </span>
-
-              {page > 1 && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => changePage(1)}
-                    className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-textMain transition hover:bg-sub"
-                  >
-                    « First
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => changePage(page - 1)}
-                    className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-textMain transition hover:bg-sub"
-                  >
-                    «
-                  </button>
-                </>
-              )}
-
-              {pageTokens.map((tok, idx) =>
-                tok === "..." ? (
-                  <span
-                    key={`dots-${idx}`}
-                    className="select-none px-1.5 py-1.5 text-xs text-textSub"
-                  >
-                    ...
-                  </span>
-                ) : (
-                  <button
-                    key={tok}
-                    type="button"
-                    onClick={() => changePage(tok)}
-                    className={`min-w-[34px] rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition ${
-                      page === tok
-                        ? "border-primary bg-primary text-primary-foreground shadow-sm shadow-primary/25"
-                        : "border-border bg-surface text-textMain hover:bg-sub"
-                    }`}
-                  >
-                    {tok.toLocaleString("en-US")}
-                  </button>
-                )
-              )}
-
-              {page < totalPages && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => changePage(page + 1)}
-                    className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-textMain transition hover:bg-sub"
-                  >
-                    »
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => changePage(totalPages)}
-                    className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-textMain transition hover:bg-sub"
-                  >
-                    Last »
-                  </button>
-                </>
-              )}
-            </div>
-
-            <form
-              onSubmit={handleJumpPage}
-              className="flex items-center gap-2 text-xs text-textSub"
-            >
-              <span>Đi tới trang:</span>
-              <input
-                type="number"
-                min={1}
-                max={totalPages}
-                value={jumpPageInput}
-                onChange={(e) => setJumpPageInput(e.target.value)}
-                placeholder={`1 - ${totalPages}`}
-                className="w-24 rounded-lg border border-border bg-sub px-2.5 py-1 text-base text-textMain placeholder:text-textSub outline-none focus:border-primary sm:text-xs"
-              />
-              <button
-                type="submit"
-                className="rounded-lg border border-border bg-surface px-3.5 py-1.5 text-xs font-medium text-textMain transition hover:border-primary hover:bg-primary hover:text-primary-foreground sm:py-1"
-              >
-                Đi
-              </button>
-            </form>
-          </div>
-        )}
+        <button
+          type="button"
+          onClick={() => setShowDebug(!showDebug)}
+          className="py-1 text-xs text-textSub underline transition-colors hover:text-textMain"
+        >
+          {showDebug ? "Ẩn chi tiết" : "🔍 Chi tiết nguồn"}
+        </button>
       </div>
+
+      {/* Hộp debug chi tiết luồng phát */}
+      {showDebug && (
+        <div className="space-y-1 overflow-x-auto rounded-xl border border-border bg-sub/80 p-3 font-mono text-xs text-textSub">
+          <p className="break-all text-textMain">
+            Đang phát ({activeType}): {activeUrl}
+          </p>
+          {current?.rawUrl && (
+            <p className="break-all text-success">
+              Link gốc: {current.rawUrl}
+            </p>
+          )}
+          {playerErrorLog && (
+            <p className="break-all text-hot">
+              Trạng thái luồng trước: {playerErrorLog}
+            </p>
+          )}
+          {video?._debug?.playerSnippet && (
+            <pre className="break-all whitespace-pre-wrap rounded-lg border border-border bg-surface p-2 text-[11px] text-textMain">
+              {video._debug.playerSnippet}
+            </pre>
+          )}
+        </div>
+      )}
     </div>
   );
 }
