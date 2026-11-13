@@ -2,6 +2,39 @@
 
 import { useEffect, useRef, useState } from "react";
 
+// Hàm tự động bóc bỏ Fake Header (PNG/JPG/GIF/junk bytes) nếu segment .ts bị ngụy trang
+function cleanTsSegmentBuffer(buf, isEncrypted = false) {
+  if (!buf || isEncrypted || buf.byteLength < 564) return buf;
+  const view = new Uint8Array(buf);
+  // Nếu đã bắt đầu chuẩn bằng MPEG-TS sync byte 0x47 mỗi 188 bytes thì giữ nguyên
+  if (view[0] === 0x47 && view[188] === 0x47 && view[376] === 0x47) {
+    return buf;
+  }
+  // Nếu là fMP4 (ftyp / moof / styp) thì giữ nguyên
+  const boxName = String.fromCharCode(view[4], view[5], view[6], view[7]);
+  if (
+    boxName === "ftyp" ||
+    boxName === "styp" ||
+    boxName === "moof" ||
+    boxName === "sidx"
+  ) {
+    return buf;
+  }
+  // Quét tìm vị trí bắt đầu thực sự của luồng MPEG-TS (3 gói 188-byte liên tiếp có byte đầu là 0x47)
+  const maxScan = Math.min(view.length - 376, 4096);
+  for (let i = 1; i < maxScan; i++) {
+    if (
+      view[i] === 0x47 &&
+      view[i + 188] === 0x47 &&
+      view[i + 376] === 0x47
+    ) {
+      return buf.slice(i);
+    }
+  }
+  return buf;
+}
+
+// Custom Loader toàn diện cho Hls.js: Bắt cả Key (AES-128), Playlist (.m3u8) và Fragment (.ts)
 function createUniversalHlsLoader(HlsClass, postReferer = "https://qmhv3.top/") {
   const DefaultLoader = HlsClass.DefaultConfig.loader;
 
@@ -37,6 +70,24 @@ function createUniversalHlsLoader(HlsClass, postReferer = "https://qmhv3.top/") 
       const url = context.url || "";
       const isBinary = context.responseType === "arraybuffer";
 
+      // Nếu là file .m3u8 (manifest / level) mà chưa đi qua rawProxy thì chuyển qua rawProxy
+      if (!isBinary) {
+        if (
+          url.startsWith("http") &&
+          !url.includes(window.location.host) &&
+          (url.includes(".m3u8") || url.includes("qmhv3.top"))
+        ) {
+          context.url = `${
+            window.location.origin
+          }/api/videos?rawProxy=1&url=${encodeURIComponent(
+            url
+          )}&referer=${encodeURIComponent(postReferer)}`;
+        }
+        this.inner.load(context, config, callbacks);
+        return;
+      }
+
+      // Bóc URL gốc nếu đang nằm trong /api/videos?rawProxy=1&url=...
       let rawRemoteUrl = url;
       let customRef = postReferer;
       if (url.includes("/api/videos?") && url.includes("url=")) {
@@ -55,11 +106,21 @@ function createUniversalHlsLoader(HlsClass, postReferer = "https://qmhv3.top/") 
 
       if (isBinary && /^https?:\/\//i.test(rawRemoteUrl)) {
         const startTime = performance.now();
+        // Phát hiện chính xác request tải Khóa giải mã AES-128 trong Hls.js
         const isKey =
+          context.type === "key" ||
           rawRemoteUrl.includes(".key") ||
           rawRemoteUrl.includes("/key") ||
           url.includes("isKey=1") ||
-          Boolean(context.decryptdata && !context.frag);
+          Boolean(context.decryptdata) ||
+          Boolean(context.frag && context.frag.type === "key");
+
+        const isEncryptedFrag = Boolean(
+          !isKey &&
+            context.frag &&
+            context.frag.decryptdata &&
+            context.frag.decryptdata.uri
+        );
 
         const proxyUrl = `${window.location.origin}/api/videos?rawProxy=1${
           isKey ? "&isKey=1" : "&proxySegments=1"
@@ -68,6 +129,9 @@ function createUniversalHlsLoader(HlsClass, postReferer = "https://qmhv3.top/") 
         )}`;
 
         const corsEuUrl = `https://cors.eu.org/${rawRemoteUrl}`;
+        const codeTabsUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
+          rawRemoteUrl
+        )}`;
 
         const validateArrayBuffer = async (res) => {
           if (!res.ok && res.status !== 206) {
@@ -85,7 +149,16 @@ function createUniversalHlsLoader(HlsClass, postReferer = "https://qmhv3.top/") 
               throw new Error("HTML_ERR");
             }
           }
-          return buf;
+          // Nếu là Key AES-128 thì độ dài chuẩn thường là 16 bytes (tránh nhận trang báo lỗi HTML dài hàng nghìn byte làm Key)
+          if (isKey && buf.byteLength > 256) {
+            const head = new TextDecoder()
+              .decode(buf.slice(0, 15))
+              .toLowerCase();
+            if (head.startsWith("<!doc") || head.startsWith("<html")) {
+              throw new Error("KEY_IS_HTML");
+            }
+          }
+          return isKey ? buf : cleanTsSegmentBuffer(buf, isEncryptedFrag);
         };
 
         const signal = this.controller ? this.controller.signal : undefined;
@@ -103,6 +176,13 @@ function createUniversalHlsLoader(HlsClass, postReferer = "https://qmhv3.top/") 
             signal
           }).then(validateArrayBuffer),
           fetch(corsEuUrl, {
+            referrerPolicy: "no-referrer",
+            mode: "cors",
+            credentials: "omit",
+            cache: "no-store",
+            signal
+          }).then(validateArrayBuffer),
+          fetch(codeTabsUrl, {
             referrerPolicy: "no-referrer",
             mode: "cors",
             credentials: "omit",
@@ -136,7 +216,7 @@ function createUniversalHlsLoader(HlsClass, postReferer = "https://qmhv3.top/") 
           .catch((err) => {
             if (this.aborted) return;
             callbacks.onError(
-              { code: 403, text: err?.message || "frag_or_key_failed" },
+              { code: 403, text: err?.message || "binary_load_failed" },
               context,
               null,
               {}
@@ -166,6 +246,7 @@ export default function Player({
   const [autoSwitchedMsg, setAutoSwitchedMsg] = useState("");
   const [showDebug, setShowDebug] = useState(false);
   const [playerErrorLog, setPlayerErrorLog] = useState("");
+  const [liveDiagnostic, setLiveDiagnostic] = useState("");
 
   const rawSources = propSources || video?.sources || [];
 
@@ -225,6 +306,7 @@ export default function Player({
     setActiveIdx(0);
     setAutoSwitchedMsg("");
     setPlayerErrorLog("");
+    setLiveDiagnostic("");
   }, [video?.slug]);
 
   const switchNextServer = (reason = "") => {
@@ -282,8 +364,8 @@ export default function Player({
     const startWatchdog = () => {
       clearWatchdog();
       watchdogTimerRef.current = setTimeout(() => {
-        if (!isCancelled && el && el.readyState < 1 && el.currentTime === 0) {
-          switchNextServer("Quá 15s chưa nhận được khung hình");
+        if (!isCancelled && el && el.readyState < 2 && el.currentTime === 0) {
+          switchNextServer("Quá 15s chưa giải mã được khung hình");
         }
       }, 15000);
     };
@@ -318,13 +400,17 @@ export default function Player({
         const hls = new window.Hls({
           enableWorker: false,
           lowLatencyMode: false,
+          // QUAN TRỌNG: Gắn vào cả `loader` và `fLoader` để KeyController (tải khóa AES-128) cũng đi qua UniversalHlsLoader!
+          loader: CustomLoader,
           fLoader: CustomLoader,
           manifestLoadingTimeOut: 12000,
           manifestLoadingMaxRetry: 2,
           levelLoadingTimeOut: 12000,
           levelLoadingMaxRetry: 2,
           fragLoadingTimeOut: 18000,
-          fragLoadingMaxRetry: 3,
+          fragLoadingMaxRetry: 2,
+          keyLoadingTimeOut: 12000,
+          keyLoadingMaxRetry: 2,
           xhrSetup: (xhr) => {
             xhr.withCredentials = false;
           }
@@ -334,32 +420,60 @@ export default function Player({
         hls.loadSource(resolvedStreamUrl);
         hls.attachMedia(el);
 
-        hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+        hls.on(window.Hls.Events.MANIFEST_PARSED, (_, data) => {
           if (isCancelled) return;
+          setLiveDiagnostic(
+            `Manifest OK (${data.levels?.length || 1} levels) -> Đang tải Key/Frag...`
+          );
           el.play().catch(() => {});
         });
 
-        hls.on(window.Hls.Events.FRAG_LOADED, () => {
+        hls.on(window.Hls.Events.KEY_LOADED, () => {
+          if (isCancelled) return;
+          setLiveDiagnostic("Manifest OK -> Key AES-128 OK -> Đang tải Frag...");
+        });
+
+        hls.on(window.Hls.Events.FRAG_LOADED, (_, data) => {
+          if (isCancelled) return;
+          setLiveDiagnostic(
+            `Frag #${data.frag?.sn ?? 0} đã tải (${
+              data.frag?.stats?.loaded || 0
+            } bytes) -> Đang giải mã...`
+          );
+        });
+
+        hls.on(window.Hls.Events.FRAG_PARSED, () => {
           if (isCancelled) return;
           clearWatchdog();
+          setLiveDiagnostic("Đang phát bình thường!");
         });
 
         hls.on(window.Hls.Events.ERROR, (_, data) => {
           if (isCancelled) return;
+          const failedUrl =
+            data.frag?.url ||
+            data.context?.url ||
+            data.networkDetails?.responseURL ||
+            "";
+          const shortUrl = failedUrl
+            ? ` [${failedUrl.slice(0, 85)}]`
+            : "";
+          const errCode = data.response?.code
+            ? `(${data.response.code})`
+            : "";
+          const detailMsg = `${data.type}: ${data.details} ${errCode}${shortUrl}`.trim();
+          setLiveDiagnostic(`Lỗi: ${detailMsg}`);
+
           if (data.fatal) {
             if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
               hls.recoverMediaError();
               return;
             }
-            const errCode = data.response?.code
-              ? `(${data.response.code})`
-              : "";
-            const errMsg = `${data.type}: ${data.details} ${errCode}`.trim();
             try {
               hls.destroy();
             } catch (_) {}
             hlsRef.current = null;
-            switchNextServer(errMsg);
+            switchNextServer(detailMsg);
           }
         });
       } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
@@ -523,14 +637,20 @@ export default function Player({
               Link gốc: {current.rawUrl}
             </p>
           )}
+          {liveDiagnostic && (
+            <p className="break-all text-amber-300">
+              Tiến trình HLS: {liveDiagnostic}
+            </p>
+          )}
           {playerErrorLog && (
             <p className="break-all text-hot">
               Trạng thái luồng trước: {playerErrorLog}
             </p>
           )}
-          {video?._debug?.playerSnippet && (
-            <pre className="break-all whitespace-pre-wrap rounded-lg border border-border bg-surface p-2 text-[11px] text-textMain">
-              {video._debug.playerSnippet}
+          {video?._debug?.m3u8Preview && (
+            <pre className="break-all whitespace-pre-wrap rounded-lg border border-border bg-surface p-2 text-[11px] text-slate-300">
+              M3U8 mẫu:{"\n"}
+              {video._debug.m3u8Preview}
             </pre>
           )}
         </div>
