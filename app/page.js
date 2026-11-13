@@ -42,7 +42,8 @@ const SORT_OPTIONS = [
 ];
 
 const STATE_STORAGE_KEY = "videosite_browse_state_v1";
-const CACHE_STORAGE_KEY = "videosite_list_cache_v6";
+// Đổi key cache sang v8 để xóa sạch cache danh sách ít video cũ
+const CACHE_STORAGE_KEY = "videosite_list_cache_v8";
 const SCROLL_STORAGE_KEY = "videosite_scroll_y_v1";
 
 function buildPagination(currentPage, totalPages) {
@@ -123,56 +124,71 @@ function getInitialBrowseState() {
   return { category: "all", page: 1, sortBy: "latest", q: "" };
 }
 
-// Hàm dự phòng gọi trực tiếp API qmhv3.top từ trình duyệt người dùng nếu IP Vercel bị chặn
+// Hàm dự phòng bóc tách trực tiếp danh sách phim QMH từ trình duyệt nếu IP Vercel bị chặn
 async function fetchQmhClientSideFallback(page = 1, q = "") {
-  const endpoints = [
-    `https://qmhv3.top/api/videos?category=movie&page=${page}${q ? `&q=${encodeURIComponent(q)}` : ""}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(`https://qmhv3.top/api/videos?category=movie&page=${page}`)}`
+  const targetPageUrl = `https://qmhv3.top/?tab=movie&category=movie${
+    page > 1 ? `&page=${page}` : ""
+  }${q ? `&q=${encodeURIComponent(q)}` : ""}`;
+
+  const proxyUrls = [
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetPageUrl)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetPageUrl)}`
   ];
 
-  for (const url of endpoints) {
+  for (const url of proxyUrls) {
     try {
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) continue;
-      const json = await res.json();
-      const rawList = Array.isArray(json?.items)
-        ? json.items
-        : Array.isArray(json?.data)
-        ? json.data
-        : [];
-      if (rawList.length > 0) {
-        const mapped = rawList.map((item) => {
-          const rawSlug = String(item.slug || item.id || "").replace(
-            /^\/+|\/+$/g,
-            ""
-          );
-          const fullSlug = rawSlug.startsWith("qmh__")
-            ? rawSlug
-            : `qmh__${rawSlug}`;
-          let thumb =
-            item.thumbnail ||
-            item.thumb ||
-            item.poster ||
-            item.image ||
-            "https://placehold.co/600x340/1e293b/94a3b8?text=QMH";
-          if (thumb.startsWith("/") && !thumb.startsWith("//")) {
-            thumb = `https://qmhv3.top${thumb}`;
+      let text = await res.text();
+      if (!text || text.length < 200) continue;
+
+      for (let i = 0; i < 2; i++) {
+        text = text.replace(/\\"/g, '"').replace(/\\\//g, "/");
+      }
+
+      const items = [];
+      const seen = new Set();
+      const slugRegex = /"slug"\s*:\s*"([a-zA-Z0-9_-]{5,140})"/g;
+      let m;
+      while ((m = slugRegex.exec(text)) !== null) {
+        const s = m[1];
+        if (seen.has(s) || /banner|casino|crash|dice|slots|idol-live/i.test(s)) {
+          continue;
+        }
+        const chunk = text.slice(
+          Math.max(0, m.index - 500),
+          Math.min(text.length, m.index + 900)
+        );
+        const titleM = chunk.match(/"(?:title|name)"\s*:\s*"([^"]{3,220})"/i);
+        const thumbM = chunk.match(
+          /"(?:thumbnail|thumb|poster|image|cover)"\s*:\s*"([^"]{5,400})"/i
+        );
+        if (titleM && thumbM) {
+          let img = thumbM[1];
+          if (img.startsWith("/")) img = `https://qmhv3.top${img}`;
+          if (!img.startsWith("http") || /logo|banner|favicon/i.test(img)) {
+            continue;
           }
-          return {
-            ...item,
+          seen.add(s);
+          const fullSlug = `qmh__${s}`;
+          items.push({
             id: fullSlug,
             slug: fullSlug,
+            title: titleM[1],
             category: "qmh-movie",
-            thumbnail: thumb,
-            thumb,
-            poster: thumb,
-            image: thumb
-          };
-        });
-        return {
-          items: mapped,
-          totalPages: Math.max(1, Number(json?.totalPages) || page + 5)
-        };
+            thumbnail: img,
+            thumb: img,
+            poster: img,
+            image: img,
+            views: "0",
+            comments: "0",
+            likes: "0"
+          });
+        }
+      }
+
+      if (items.length > 0) {
+        return { items, totalPages: page + 5 };
       }
     } catch (_) {}
   }
@@ -277,10 +293,11 @@ export default function HomePage() {
         const rawCache = sessionStorage.getItem(CACHE_STORAGE_KEY);
         if (rawCache) {
           const parsedCache = JSON.parse(rawCache);
+          const minValidItems = category === "qmh-movie" ? 8 : 1;
           if (
             parsedCache.key === cacheKey &&
             Array.isArray(parsedCache.items) &&
-            parsedCache.items.length > 0 &&
+            parsedCache.items.length >= minValidItems &&
             Date.now() - (parsedCache.ts || 0) < 5 * 60 * 1000
           ) {
             setItems(parsedCache.items);
@@ -340,10 +357,12 @@ export default function HomePage() {
           setListDebug(data._debug);
         }
 
-        // Nếu đang ở tab Phim QMH mà server Vercel bị chặn trả về rỗng, thử gọi trực tiếp từ trình duyệt
-        if (category === "qmh-movie" && loadedItems.length === 0) {
+        if (category === "qmh-movie" && loadedItems.length < 5) {
           const clientFallback = await fetchQmhClientSideFallback(page, q);
-          if (clientFallback && clientFallback.items.length > 0) {
+          if (
+            clientFallback &&
+            clientFallback.items.length > loadedItems.length
+          ) {
             loadedItems = clientFallback.items;
             loadedTotalPages = clientFallback.totalPages;
           }
