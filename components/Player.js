@@ -105,7 +105,6 @@ export default function Player({
     });
   };
 
-  // Khi người dùng bật "Chi tiết nguồn", lấy thử 10 dòng đầu của file .m3u8 để hiển thị chẩn đoán
   useEffect(() => {
     if (!showDebug || !activeUrl || activeType !== "hls") return;
     let mounted = true;
@@ -118,7 +117,7 @@ export default function Player({
       .then((r) => r.text())
       .then((txt) => {
         if (mounted && txt) {
-          setM3u8Sample(txt.split(/\r?\n/).slice(0, 12).join("\n"));
+          setM3u8Sample(txt.split(/\r?\n/).slice(0, 14).join("\n"));
         }
       })
       .catch((e) => {
@@ -163,13 +162,31 @@ export default function Player({
     const startWatchdog = () => {
       clearWatchdog();
       watchdogTimerRef.current = setTimeout(() => {
-        if (!isCancelled && el && el.readyState < 2 && el.currentTime === 0) {
-          switchNextServer("Quá 15s chưa giải mã được khung hình");
+        // CHỈ chuyển server nếu sau 20 giây mà thẻ <video> vẫn chưa tải được metadata (readyState === 0)
+        // Nếu đã lên hình (readyState >= 1, như hình chú khủng long QMH V3) thì TUYỆT ĐỐI KHÔNG tự chuyển server!
+        if (!isCancelled && el && el.readyState === 0) {
+          switchNextServer("Quá 20s chưa kết nối được luồng");
         }
-      }, 15000);
+      }, 20000);
     };
 
+    const tryAutoPlaySmart = () => {
+      if (!el || isCancelled) return;
+      const playPromise = el.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => {
+          // Nếu trình duyệt chặn Autoplay có tiếng, tự động phát ở chế độ tắt tiếng trước để video chạy luôn!
+          if (!isCancelled && el) {
+            el.muted = true;
+            el.play().catch(() => {});
+          }
+        });
+      }
+    };
+
+    el.addEventListener("loadedmetadata", clearWatchdog);
     el.addEventListener("loadeddata", clearWatchdog);
+    el.addEventListener("canplay", clearWatchdog);
     el.addEventListener("playing", clearWatchdog);
 
     const resolvedStreamUrl =
@@ -180,11 +197,13 @@ export default function Player({
     if (!isHlsStream) {
       startWatchdog();
       el.src = resolvedStreamUrl;
-      el.play().catch(() => {});
+      tryAutoPlaySmart();
       return () => {
         isCancelled = true;
         clearWatchdog();
+        el.removeEventListener("loadedmetadata", clearWatchdog);
         el.removeEventListener("loadeddata", clearWatchdog);
+        el.removeEventListener("canplay", clearWatchdog);
         el.removeEventListener("playing", clearWatchdog);
       };
     }
@@ -194,18 +213,17 @@ export default function Player({
       startWatchdog();
 
       if (window.Hls && window.Hls.isSupported()) {
-        // Dùng XHR Loader mặc định chính chủ của Hls.js để không bị treo this.stats
         const hls = new window.Hls({
-          enableWorker: false,
+          enableWorker: true,
           lowLatencyMode: false,
-          manifestLoadingTimeOut: 10000,
-          manifestLoadingMaxRetry: 2,
-          levelLoadingTimeOut: 10000,
-          levelLoadingMaxRetry: 2,
-          fragLoadingTimeOut: 12000,
-          fragLoadingMaxRetry: 2,
-          keyLoadingTimeOut: 8000,
-          keyLoadingMaxRetry: 1,
+          manifestLoadingTimeOut: 15000,
+          manifestLoadingMaxRetry: 3,
+          levelLoadingTimeOut: 15000,
+          levelLoadingMaxRetry: 3,
+          fragLoadingTimeOut: 20000,
+          fragLoadingMaxRetry: 4,
+          keyLoadingTimeOut: 12000,
+          keyLoadingMaxRetry: 3,
           xhrSetup: (xhr) => {
             xhr.withCredentials = false;
           }
@@ -220,15 +238,7 @@ export default function Player({
           setLiveDiagnostic(
             `Manifest OK (${data.levels?.length || 1} levels) -> Đang tải Key/Frag...`
           );
-          el.play().catch(() => {});
-        });
-
-        hls.on(window.Hls.Events.KEY_LOADING, (_, data) => {
-          if (isCancelled) return;
-          const kUri = data.frag?.decryptdata?.uri || "";
-          setLiveDiagnostic(
-            `Đang tải Key: ${kUri.startsWith("data:") ? "Base64 Inline Key" : kUri.slice(0, 70)}`
-          );
+          tryAutoPlaySmart();
         });
 
         hls.on(window.Hls.Events.KEY_LOADED, () => {
@@ -236,28 +246,21 @@ export default function Player({
           setLiveDiagnostic("Key AES-128 OK -> Đang tải Frag #0...");
         });
 
-        hls.on(window.Hls.Events.FRAG_LOADING, (_, data) => {
-          if (isCancelled) return;
-          if ((data.frag?.sn ?? 0) <= 1) {
-            setLiveDiagnostic(
-              `Đang tải Frag #${data.frag?.sn ?? 0}: ${(data.frag?.url || "").slice(0, 75)}`
-            );
-          }
-        });
-
+        // Ngay khi tải được Frag đầu tiên (hoặc giải mã xong), hủy ngay bộ đếm timeout để giữ nguyên Server #1 (VIP)!
         hls.on(window.Hls.Events.FRAG_LOADED, (_, data) => {
           if (isCancelled) return;
+          clearWatchdog();
           setLiveDiagnostic(
             `Frag #${data.frag?.sn ?? 0} đã tải (${
               data.frag?.stats?.loaded || 0
-            } bytes) -> Đang giải mã...`
+            } bytes) -> Đang phát!`
           );
         });
 
         hls.on(window.Hls.Events.FRAG_PARSED, () => {
           if (isCancelled) return;
           clearWatchdog();
-          setLiveDiagnostic("Đang phát bình thường!");
+          setLiveDiagnostic("Đã giải mã hình ảnh thành công!");
         });
 
         hls.on(window.Hls.Events.ERROR, (_, data) => {
@@ -279,6 +282,12 @@ export default function Player({
               hls.recoverMediaError();
               return;
             }
+            if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+              // Cho phép Hls.js thử kết nối lại 1 lần trước khi đổi server
+              try {
+                hls.startLoad();
+              } catch (_) {}
+            }
             try {
               hls.destroy();
             } catch (_) {}
@@ -289,7 +298,7 @@ export default function Player({
       } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
         el.src = resolvedStreamUrl;
         el.load();
-        el.play().catch(() => {});
+        tryAutoPlaySmart();
       }
     };
 
@@ -315,7 +324,9 @@ export default function Player({
     return () => {
       isCancelled = true;
       clearWatchdog();
+      el.removeEventListener("loadedmetadata", clearWatchdog);
       el.removeEventListener("loadeddata", clearWatchdog);
+      el.removeEventListener("canplay", clearWatchdog);
       el.removeEventListener("playing", clearWatchdog);
       if (hlsRef.current) {
         try {
