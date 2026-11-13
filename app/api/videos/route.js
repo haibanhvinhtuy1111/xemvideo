@@ -2817,11 +2817,8 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
       const streamType = lower.includes(".mp4") ? "mp4" : "hls";
       allStreams.push(mediaUrl);
 
-      // 1. Luồng Hybrid (Lấy .m3u8 qua proxy < 0.5s, còn Key và .ts sẽ do Custom Loader của trình duyệt tự lấy bằng IP dân cư hoặc fallback)
       const fastHybridUrl = `/api/videos?rawProxy=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
-      // 2. Luồng Full Proxy (Ép cả Key & Segment đi qua Proxy)
       const fullProxyUrl = `/api/videos?rawProxy=1&proxySegments=1&url=${encodeURIComponent(mediaUrl)}&referer=${encodeURIComponent(effectiveReferer)}${cookieSuffix}`;
-      // 3. Trình phát Iframe Độc lập (Tự xử lý tải Key bằng fetch no-referrer + cors.eu.org ngay trên trình duyệt)
       const standalonePlayerUrl = `/api/videos?qmhPlayerProxy=1&url=${encodeURIComponent(mediaUrl)}&postUrl=${encodeURIComponent(postLink)}&referer=${encodeURIComponent(effectiveReferer)}`;
 
       customSources.push({
@@ -2989,7 +2986,7 @@ async function fetchQmhVideoDetail(cleanSlug = "") {
 }
 
 // =====================================================================
-// HÀM PROXY LUỒNG DỮ LIỆU / HLS SIÊU TỐC (KHÔNG TREO M3U8, ĐUA SONG SONG CHO KEY)
+// HÀM PROXY LUỒNG DỮ LIỆU / HLS SIÊU TỐC (XỬ LÝ CẢ KEY VÀ FRAGMENT)
 // =====================================================================
 function rewriteM3u8Manifest(
   m3u8Text,
@@ -3009,7 +3006,6 @@ function rewriteM3u8Manifest(
           }
           try {
             const abs = new URL(uri, basePlaylistUrl).toString();
-            // Nếu không bật proxySegments, giữ nguyên URL tuyệt đối của Key để Custom Loader trên trình duyệt tự lấy bằng IP dân cư trước, nếu 403 mới gọi về isKey=1!
             if (!proxySegments) {
               return `URI="${abs}"`;
             }
@@ -3029,7 +3025,6 @@ function rewriteM3u8Manifest(
           lowerAbs.includes("/chunklist") ||
           lowerAbs.includes("/index");
 
-        // Luôn proxy các sub-playlist (.m3u8), còn segment .ts thì chỉ proxy khi bật proxySegments=1
         if (isSubPlaylist || proxySegments) {
           return buildProxyUrl(abs, proxySegments, false);
         }
@@ -3041,8 +3036,7 @@ function rewriteM3u8Manifest(
     .join("\n");
 }
 
-// Đua song song (Promise.any) tất cả các cổng để lấy Key / Segment trong < 2.5s (Không bao giờ treo tuần tự!)
-async function fetchBinaryRace(targetUrl, headers, timeoutMs = 3500) {
+async function fetchBinaryRace(targetUrl, headers, timeoutMs = 4000) {
   const checkValidBinary = async (res) => {
     if (!res.ok && res.status !== 206) throw new Error("status_" + res.status);
     const buf = await res.arrayBuffer();
@@ -3109,7 +3103,8 @@ async function handleRawProxy(req) {
   }
 
   try {
-    const isQmhTarget = targetUrl.includes("qmhv3.top");
+    const isQmhTarget =
+      targetUrl.includes("qmhv3.top") || referer.includes("qmhv3.top");
     let refOrigin = isQmhTarget ? QMH_DOMAIN : DEFAULT_DOMAIN;
     if (!isQmhTarget) {
       try {
@@ -3162,7 +3157,6 @@ async function handleRawProxy(req) {
         cookie ? `&cookie=${encodeURIComponent(cookie)}` : ""
       }`;
 
-    // NHÁNH 1: XỬ LÝ KHÓA GIẢI MÃ AES-128 BẰNG PROMISE.ANY SIÊU NHANH (< 3s)
     if (isKeyRequest) {
       const keyResult = await fetchBinaryRace(targetUrl, headers, 3500);
       if (keyResult && keyResult.buffer) {
@@ -3187,7 +3181,6 @@ async function handleRawProxy(req) {
       lowerTarget.includes("/playlist") ||
       lowerTarget.includes("/master");
 
-    // NHÁNH 2: TRẢ VỀ PLAYLIST .M3U8 NGAY LẬP TỨC TRONG < 1 GIÂY (KHÔNG BLOCK CHỜ TẢI KEY!)
     if (isExplicitM3u8) {
       const fastRes = await fetchFastText(targetUrl, headers, 3500);
       if (fastRes.text && fastRes.text.trim().startsWith("#EXTM3U")) {
@@ -3208,7 +3201,6 @@ async function handleRawProxy(req) {
       }
     }
 
-    // NHÁNH 3: PHÂN ĐOẠN VIDEO (.TS / .MP4)
     const fetchOpts = { method, headers };
     if (method !== "GET" && method !== "HEAD") {
       const bodyBuf = await req.arrayBuffer();
@@ -3223,7 +3215,7 @@ async function handleRawProxy(req) {
     } catch (_) {}
 
     if (!upstream || (!upstream.ok && upstream.status !== 206)) {
-      const binFallback = await fetchBinaryRace(targetUrl, headers, 4000);
+      const binFallback = await fetchBinaryRace(targetUrl, headers, 4500);
       if (binFallback && binFallback.buffer) {
         let outType = binFallback.contentType || "video/mp2t";
         if (
@@ -3370,7 +3362,7 @@ export async function GET(req) {
     return handleRawProxy(req);
   }
 
-  // Trình phát Iframe Dự Phòng Độc Lập cho QMH (Bắt buộc dùng Fetch no-referrer + Đua đa luồng ngay trên trình duyệt)
+  // Trình phát Iframe Dự Phòng Độc Lập cho QMH (Bắt mọi domain CDN của cả Key và Fragment .ts)
   if (sp.get("qmhPlayerProxy") === "1") {
     const targetUrl = sp.get("url") || "";
     const referer = sp.get("referer") || `${QMH_DOMAIN}/`;
@@ -3394,57 +3386,63 @@ export async function GET(req) {
     (function() {
       var video = document.getElementById("v");
       var streamUrl = ${JSON.stringify(fastHybridUrl)};
-      var rawM3u8 = ${JSON.stringify(targetUrl)};
 
       if (window.Hls && Hls.isSupported()) {
         var DefaultLoader = Hls.DefaultConfig.loader;
-        function MultiRouteLoader(config) {
+        function UniversalLoader(config) {
           this.inner = new DefaultLoader(config);
         }
-        MultiRouteLoader.prototype.destroy = function() {
+        UniversalLoader.prototype.destroy = function() {
           if (this.inner) this.inner.destroy();
         };
-        MultiRouteLoader.prototype.abort = function() {
+        UniversalLoader.prototype.abort = function() {
           if (this.inner) this.inner.abort();
         };
-        MultiRouteLoader.prototype.load = function(context, config, callbacks) {
-          var url = context.url;
+        UniversalLoader.prototype.load = function(context, config, callbacks) {
+          var url = context.url || "";
           var isBinary = context.responseType === "arraybuffer";
-          // Nếu đang tải Key hoặc Segment của api.qmhv3.top, đua song song giữa Fetch no-referrer (IP người dùng) và Proxy
-          if (isBinary && url.indexOf("qmhv3.top") !== -1 && url.indexOf("/api/videos?") === -1) {
+          var rawUrl = url;
+          if (url.indexOf("/api/videos?") !== -1 && url.indexOf("url=") !== -1) {
+            try {
+              var uObj = new URL(url, window.location.origin);
+              rawUrl = uObj.searchParams.get("url") || url;
+            } catch (e) {}
+          }
+          if (isBinary && /^https?:\\/\\//i.test(rawUrl)) {
             var startTime = performance.now();
-            var isKey = url.indexOf(".key") !== -1 || url.indexOf("/key") !== -1 || context.frag && context.frag.type === "key";
-            var proxyFallback = "/api/videos?rawProxy=1" + (isKey ? "&isKey=1" : "&proxySegments=1") + "&url=" + encodeURIComponent(url) + "&referer=" + encodeURIComponent("https://qmhv3.top/");
+            var isKey = rawUrl.indexOf(".key") !== -1 || rawUrl.indexOf("/key") !== -1 || Boolean(context.decryptdata && !context.frag);
+            var proxyFallback = "/api/videos?rawProxy=1" + (isKey ? "&isKey=1" : "&proxySegments=1") + "&url=" + encodeURIComponent(rawUrl) + "&referer=" + encodeURIComponent("https://qmhv3.top/");
+            var corsEu = "https://cors.eu.org/" + rawUrl;
 
-            fetch(url, { referrerPolicy: "no-referrer", mode: "cors", credentials: "omit" })
-              .then(function(r) {
-                if (!r.ok) throw new Error("direct_" + r.status);
-                return r.arrayBuffer();
-              })
-              .catch(function() {
-                return fetch(proxyFallback).then(function(r) {
-                  if (!r.ok) throw new Error("proxy_" + r.status);
-                  return r.arrayBuffer();
-                });
-              })
-              .then(function(buf) {
-                var now = performance.now();
-                var stats = {
-                  aborted: false,
-                  loaded: buf.byteLength,
-                  total: buf.byteLength,
-                  retry: 0,
-                  chunkCount: 1,
-                  bwEstimate: 0,
-                  loading: { start: startTime, first: now, end: now },
-                  parsing: { start: now, end: now },
-                  buffering: { start: now, first: now, end: now }
-                };
-                callbacks.onSuccess({ url: url, data: buf }, stats, context, null);
-              })
-              .catch(function(err) {
-                callbacks.onError({ code: 403, text: err.message }, context, null, {});
+            var checkBuf = function(r) {
+              if (!r.ok && r.status !== 206) throw new Error("status_" + r.status);
+              return r.arrayBuffer().then(function(b) {
+                if (!b || b.byteLength === 0) throw new Error("empty");
+                return b;
               });
+            };
+
+            Promise.any([
+              fetch(rawUrl, { referrerPolicy: "no-referrer", mode: "cors", credentials: "omit", cache: "no-store" }).then(checkBuf),
+              fetch(proxyFallback, { cache: "no-store" }).then(checkBuf),
+              fetch(corsEu, { referrerPolicy: "no-referrer", mode: "cors", credentials: "omit", cache: "no-store" }).then(checkBuf)
+            ]).then(function(buf) {
+              var now = performance.now();
+              var stats = {
+                aborted: false,
+                loaded: buf.byteLength,
+                total: buf.byteLength,
+                retry: 0,
+                chunkCount: 1,
+                bwEstimate: 0,
+                loading: { start: startTime, first: now, end: now },
+                parsing: { start: now, end: now },
+                buffering: { start: now, first: now, end: now }
+              };
+              callbacks.onSuccess({ url: rawUrl, data: buf }, stats, context, null);
+            }).catch(function(err) {
+              callbacks.onError({ code: 403, text: err.message }, context, null, {});
+            });
             return;
           }
           this.inner.load(context, config, callbacks);
@@ -3453,8 +3451,7 @@ export async function GET(req) {
         var hls = new Hls({
           enableWorker: false,
           lowLatencyMode: false,
-          fLoader: MultiRouteLoader,
-          pLoader: DefaultLoader
+          fLoader: UniversalLoader
         });
         hls.loadSource(streamUrl);
         hls.attachMedia(video);
