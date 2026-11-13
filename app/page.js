@@ -1,75 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-
-// Hàm tải và đóng gói lại file .m3u8 ngay trên trình duyệt (chỉ dùng cho Hls.js, không dùng cho Native Video của iOS)
-async function buildClientBlobM3u8(rawM3u8Url, proxyOrigin = "") {
-  const fetchCandidates = [
-    () =>
-      fetch(
-        `${proxyOrigin}/api/videos?rawProxy=1&proxySegments=1&url=${encodeURIComponent(
-          rawM3u8Url
-        )}&referer=${encodeURIComponent("https://qmhv3.top/")}`,
-        { cache: "no-store" }
-      ),
-    () =>
-      fetch(rawM3u8Url, {
-        referrerPolicy: "no-referrer",
-        cache: "no-store"
-      }),
-    () =>
-      fetch(
-        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
-          rawM3u8Url
-        )}`,
-        { cache: "no-store" }
-      )
-  ];
-
-  for (const runFetch of fetchCandidates) {
-    try {
-      const res = await runFetch();
-      if (!res.ok) continue;
-      const text = await res.text();
-      if (!text || !text.trim().startsWith("#EXTM3U")) continue;
-
-      const rewritten = text
-        .split(/\r?\n/)
-        .map((line) => {
-          const trimmed = line.trim();
-          if (!trimmed) return line;
-          if (trimmed.startsWith("#")) {
-            return line.replace(/URI=["']([^"']+)["']/gi, (_, uri) => {
-              try {
-                if (uri.startsWith("/api/videos?")) {
-                  return `URI="${window.location.origin}${uri}"`;
-                }
-                const abs = new URL(uri, rawM3u8Url).toString();
-                return `URI="${abs}"`;
-              } catch (_) {
-                return `URI="${uri}"`;
-              }
-            });
-          }
-          if (trimmed.startsWith("/api/videos?")) {
-            return `${window.location.origin}${trimmed}`;
-          }
-          try {
-            return new URL(trimmed, rawM3u8Url).toString();
-          } catch (_) {
-            return line;
-          }
-        })
-        .join("\n");
-
-      const blob = new Blob([rewritten], {
-        type: "application/vnd.apple.mpegurl"
-      });
-      return URL.createObjectURL(blob);
-    } catch (_) {}
-  }
-  return null;
-}
+import { useEffect, useRef, useState } from "react";
 
 export default function Player({
   video,
@@ -81,10 +12,9 @@ export default function Player({
 }) {
   const videoRef = useRef(null);
   const watchdogTimerRef = useRef(null);
-  const blobUrlRef = useRef(null);
+  const hlsRef = useRef(null);
 
   const [activeIdx, setActiveIdx] = useState(0);
-  const [useBackupMode, setUseBackupMode] = useState(false);
   const [autoSwitchedMsg, setAutoSwitchedMsg] = useState("");
   const [showDebug, setShowDebug] = useState(false);
   const [playerErrorLog, setPlayerErrorLog] = useState("");
@@ -125,11 +55,9 @@ export default function Player({
         ]
       : [];
 
+  const sourcesCount = normalizedSources.length;
   const current = normalizedSources[activeIdx] || normalizedSources[0] || null;
-  const primaryUrl = current?.url || current?.src || "";
-  const backupUrl = current?.backupUrl || current?.proxyUrl || "";
-
-  const activeUrl = useBackupMode && backupUrl ? backupUrl : primaryUrl;
+  const activeUrl = current?.url || current?.src || "";
 
   const activeType =
     current?.type === "iframe" ||
@@ -145,73 +73,57 @@ export default function Player({
           ? "mp4"
           : "iframe");
 
+  // Reset về Server đầu tiên khi đổi sang bộ phim khác
   useEffect(() => {
     setActiveIdx(0);
-    setUseBackupMode(false);
     setAutoSwitchedMsg("");
     setPlayerErrorLog("");
-  }, [video?.slug, fallbackUrl]);
+  }, [video?.slug]);
 
-  useEffect(() => {
-    setUseBackupMode(false);
-  }, [activeIdx]);
-
-  const handleAutoSwitchNext = useCallback(
-    (reason = "") => {
-      if (watchdogTimerRef.current) {
-        clearTimeout(watchdogTimerRef.current);
-        watchdogTimerRef.current = null;
+  const switchNextServer = (reason = "") => {
+    if (watchdogTimerRef.current) {
+      clearTimeout(watchdogTimerRef.current);
+      watchdogTimerRef.current = null;
+    }
+    if (reason) {
+      setPlayerErrorLog(String(reason));
+    }
+    setActiveIdx((prev) => {
+      if (prev + 1 < sourcesCount) {
+        const nextIdx = prev + 1;
+        const nextLabel =
+          normalizedSources[nextIdx]?.label || `Server #${nextIdx + 1}`;
+        setAutoSwitchedMsg(
+          `Đã tự động chuyển sang ${nextLabel}${reason ? ` (${reason})` : ""}.`
+        );
+        return nextIdx;
       }
-      if (reason) {
-        setPlayerErrorLog(String(reason));
-      }
-
-      setActiveIdx((prevIdx) => {
-        if (prevIdx + 1 < normalizedSources.length) {
-          const nextIndex = prevIdx + 1;
-          const nextLabel =
-            normalizedSources[nextIndex]?.label || `Server #${nextIndex + 1}`;
-          setAutoSwitchedMsg(
-            `Đã tự động chuyển sang ${nextLabel} (${reason || "tối ưu luồng"}).`
-          );
-          return nextIndex;
-        }
-        return prevIdx;
-      });
-    },
-    [normalizedSources]
-  );
+      return prev;
+    });
+  };
 
   useEffect(() => {
     if (watchdogTimerRef.current) {
       clearTimeout(watchdogTimerRef.current);
       watchdogTimerRef.current = null;
     }
-    if (blobUrlRef.current) {
-      URL.revokeObjectURL(blobUrlRef.current);
-      blobUrlRef.current = null;
+    if (hlsRef.current) {
+      try {
+        hlsRef.current.destroy();
+      } catch (_) {}
+      hlsRef.current = null;
     }
 
     if (!activeUrl || activeType === "iframe" || !videoRef.current) return;
 
     const el = videoRef.current;
     let isCancelled = false;
-    let hlsInstance = null;
 
     const isHlsStream =
       activeType === "hls" ||
       activeUrl.includes(".m3u8") ||
       activeUrl.includes("rawProxy=1") ||
       activeUrl.includes("hlsProxy=1");
-
-    const startWatchdog = () => {
-      if (watchdogTimerRef.current) clearTimeout(watchdogTimerRef.current);
-      watchdogTimerRef.current = setTimeout(() => {
-        if (!isCancelled && el && el.readyState < 1 && el.currentTime === 0) {
-          handleAutoSwitchNext("Quá 8s chưa nhận được khung hình");
-        }
-      }, 8000);
-    };
 
     const clearWatchdog = () => {
       if (watchdogTimerRef.current) {
@@ -220,99 +132,113 @@ export default function Player({
       }
     };
 
+    const startWatchdog = () => {
+      clearWatchdog();
+      watchdogTimerRef.current = setTimeout(() => {
+        if (!isCancelled && el && el.readyState < 1 && el.currentTime === 0) {
+          switchNextServer("Quá 12s chưa phản hồi");
+        }
+      }, 12000);
+    };
+
+    el.addEventListener("loadedmetadata", clearWatchdog);
     el.addEventListener("loadeddata", clearWatchdog);
     el.addEventListener("playing", clearWatchdog);
 
+    const resolvedStreamUrl =
+      activeUrl.startsWith("/") && typeof window !== "undefined"
+        ? `${window.location.origin}${activeUrl}`
+        : activeUrl;
+
     if (!isHlsStream) {
       startWatchdog();
-      el.src = activeUrl;
+      el.src = resolvedStreamUrl;
       el.play().catch(() => {});
       return () => {
         isCancelled = true;
         clearWatchdog();
+        el.removeEventListener("loadedmetadata", clearWatchdog);
         el.removeEventListener("loadeddata", clearWatchdog);
         el.removeEventListener("playing", clearWatchdog);
       };
     }
 
-    const startPlayback = async () => {
+    const startHlsPlayback = () => {
+      if (isCancelled || !videoRef.current) return;
       startWatchdog();
 
-      let finalStreamUrl =
-        activeUrl.startsWith("/") && typeof window !== "undefined"
-          ? `${window.location.origin}${activeUrl}`
-          : activeUrl;
+      const isIosSafari =
+        typeof navigator !== "undefined" &&
+        /iPhone|iPad|iPod/i.test(navigator.userAgent) &&
+        !window.MSStream;
 
-      const canUseHlsJs = Boolean(window.Hls && window.Hls.isSupported());
-      const rawQmhUrl = current?.rawUrl || "";
-      const isDirectQmh =
-        activeUrl.includes("api.qmhv3.top") &&
-        !activeUrl.includes("rawProxy=1");
-
-      // CHỈ dùng Blob URL khi chạy bằng Hls.js (vì Native HLS của Safari iOS không đọc được blob: URL!)
-      if (canUseHlsJs && isDirectQmh && rawQmhUrl) {
-        const blobUrl = await buildClientBlobM3u8(
-          rawQmhUrl,
-          window.location.origin
-        );
-        if (isCancelled) return;
-        if (blobUrl) {
-          blobUrlRef.current = blobUrl;
-          finalStreamUrl = blobUrl;
-        }
+      // 1. Trên iPhone / iPad: Ưu tiên trình phát HLS phần cứng gốc của iOS nếu Hls.js không hỗ trợ MSE
+      if (
+        isIosSafari &&
+        el.canPlayType("application/vnd.apple.mpegurl") &&
+        !(window.Hls && window.Hls.isSupported())
+      ) {
+        el.src = resolvedStreamUrl;
+        el.load();
+        el.play().catch(() => {});
+        return;
       }
 
-      if (canUseHlsJs) {
-        hlsInstance = new window.Hls({
-          // Tắt enableWorker để không bị Brave Shields hoặc CSP chặn Web Worker khi đọc Blob/Proxy
+      // 2. Trên Máy tính (Chrome/Brave/Edge/Firefox) & Android: Dùng Hls.js
+      if (window.Hls && window.Hls.isSupported()) {
+        const hls = new window.Hls({
           enableWorker: false,
           lowLatencyMode: false,
-          manifestLoadingTimeOut: 8000,
-          manifestLoadingMaxRetry: 1,
-          levelLoadingTimeOut: 8000,
-          levelLoadingMaxRetry: 1,
-          fragLoadingTimeOut: 12000,
-          fragLoadingMaxRetry: 2,
+          manifestLoadingTimeOut: 10000,
+          manifestLoadingMaxRetry: 2,
+          levelLoadingTimeOut: 10000,
+          levelLoadingMaxRetry: 2,
+          fragLoadingTimeOut: 15000,
+          fragLoadingMaxRetry: 3,
           xhrSetup: (xhr) => {
             xhr.withCredentials = false;
           }
         });
+        hlsRef.current = hls;
 
-        hlsInstance.loadSource(finalStreamUrl);
-        hlsInstance.attachMedia(el);
+        hls.loadSource(resolvedStreamUrl);
+        hls.attachMedia(el);
 
-        hlsInstance.on(window.Hls.Events.MANIFEST_PARSED, () => {
+        hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
           if (isCancelled) return;
           clearWatchdog();
           el.play().catch(() => {});
         });
 
-        hlsInstance.on(window.Hls.Events.ERROR, (_, data) => {
+        hls.on(window.Hls.Events.ERROR, (_, data) => {
           if (isCancelled) return;
           if (data.fatal) {
-            const errDetail = `${data.type || "ERR"}: ${
-              data.details || "unknown"
-            } (${data.response?.code || ""})`;
+            if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+              hls.recoverMediaError();
+              return;
+            }
+            const errCode = data.response?.code ? `HTTP ${data.response.code}` : "";
+            const errMsg = `${data.details || "Lỗi luồng"} ${errCode}`.trim();
             try {
-              hlsInstance.destroy();
+              hls.destroy();
             } catch (_) {}
-            handleAutoSwitchNext(errDetail);
+            hlsRef.current = null;
+            switchNextServer(errMsg);
           }
         });
       } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
-        // Trên Safari iPhone: luôn truyền URL http/https thật (không truyền blob:)
-        el.src = finalStreamUrl;
+        el.src = resolvedStreamUrl;
         el.load();
         el.play().catch(() => {});
       }
     };
 
     if (typeof window !== "undefined" && window.Hls) {
-      startPlayback();
+      startHlsPlayback();
     } else if (typeof document !== "undefined") {
       const existingScript = document.querySelector('script[src*="hls."]');
       if (existingScript) {
-        existingScript.addEventListener("load", startPlayback, {
+        existingScript.addEventListener("load", startHlsPlayback, {
           once: true
         });
       } else {
@@ -320,28 +246,27 @@ export default function Player({
         script.src =
           "https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js";
         script.async = true;
-        script.onload = startPlayback;
-        script.onerror = startPlayback;
+        script.onload = startHlsPlayback;
+        script.onerror = startHlsPlayback;
         document.head.appendChild(script);
       }
     }
 
+    // Chỉ phụ thuộc vào activeUrl và activeType để KHÔNG bị re-init Hls.js khi component cha re-render!
     return () => {
       isCancelled = true;
       clearWatchdog();
+      el.removeEventListener("loadedmetadata", clearWatchdog);
       el.removeEventListener("loadeddata", clearWatchdog);
       el.removeEventListener("playing", clearWatchdog);
-      if (hlsInstance) {
+      if (hlsRef.current) {
         try {
-          hlsInstance.destroy();
+          hlsRef.current.destroy();
         } catch (_) {}
-      }
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
+        hlsRef.current = null;
       }
     };
-  }, [activeUrl, activeType, activeIdx, current?.rawUrl, handleAutoSwitchNext]);
+  }, [activeUrl, activeType]);
 
   if (!activeUrl) {
     return (
@@ -386,13 +311,17 @@ export default function Player({
         ) : (
           <video
             ref={videoRef}
-            key={activeUrl}
             poster={poster || video?.thumbnail}
             controls
             autoPlay
             playsInline
             referrerPolicy="no-referrer"
-            onError={() => handleAutoSwitchNext("Video Element Error")}
+            onError={() => {
+              // Chỉ tự chuyển bằng native onError khi đang không dùng Hls.js (ví dụ file .mp4 hoặc Safari iOS)
+              if (!hlsRef.current) {
+                switchNextServer("Không đọc được định dạng trên trình duyệt");
+              }
+            }}
             className="h-full w-full object-contain"
           />
         )}
@@ -436,7 +365,7 @@ export default function Player({
           {normalizedSources.length > 1 && (
             <button
               type="button"
-              onClick={() => handleAutoSwitchNext("Người dùng bấm Đổi Server")}
+              onClick={() => switchNextServer("Đổi thủ công")}
               className="rounded-xl border border-border bg-sub px-2.5 py-1.5 text-xs font-medium text-primary transition hover:bg-surface"
               title="Bấm nếu server hiện tại tải chậm"
             >
