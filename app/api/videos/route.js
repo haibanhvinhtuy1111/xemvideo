@@ -300,12 +300,7 @@ function is404Html(html = "") {
   return false;
 }
 
-function isRedirectedToHomepage(
-  requestedUrl = "",
-  finalUrl = "",
-  html = "",
-  checkCanonical = true
-) {
+function isRedirectedToHomepage(requestedUrl = "", finalUrl = "", html = "") {
   try {
     const reqObj = new URL(requestedUrl);
     const reqPath = reqObj.pathname.replace(/^\/+|\/+$/g, "");
@@ -319,25 +314,33 @@ function isRedirectedToHomepage(
       return false;
     }
 
+    // 1. Nếu HTML có chứa dấu hiệu của trang xem video chi tiết hoặc trang chuyên mục/lưu trữ thì KHÔNG BAO GIỜ coi là bị đẩy về trang chủ
+    if (
+      /<body[^>]+class=["'][^"']*\b(?:single|single-post|single-bai-viet|postid-|archive|category|tag|paged)\b/i.test(
+        html
+      ) ||
+      /\b(?:movieLoader|video2-btn|toro-play|sv2-player|entry-content|post-content)\b/i.test(
+        html
+      )
+    ) {
+      return false;
+    }
+
+    // 2. Nếu gọi trực tiếp có finalUrl (res.url):
+    // - Nếu finalUrl vẫn giữ đường dẫn con (finPath khác rỗng) -> chắc chắn KHÔNG bị redirect về trang chủ!
+    // - Chỉ khi finalUrl bị mất sạch đường dẫn (về "/") thì mới là bị redirect về trang chủ.
     if (finalUrl) {
       const finObj = new URL(finalUrl);
       const finPath = finObj.pathname.replace(/^\/+|\/+$/g, "");
       if (!finPath && !finObj.search) {
         return true;
       }
+      return false;
     }
 
-    if (checkCanonical) {
-      const canonicalMatch = html.match(
-        /<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i
-      );
-      if (canonicalMatch && canonicalMatch[1]) {
-        const canObj = new URL(canonicalMatch[1], requestedUrl);
-        const canPath = canObj.pathname.replace(/^\/+|\/+$/g, "");
-        if (!canPath && !reqObj.search) {
-          return true;
-        }
-      }
+    // 3. Nếu gọi qua Proxy (không có finalUrl): Chỉ coi là bị đẩy về trang chủ nếu thẻ <body> mang class "home"
+    if (/<body[^>]+class=["'][^"']*\bhome\b/i.test(html)) {
+      return true;
     }
   } catch (_) {}
   return false;
@@ -347,8 +350,7 @@ async function fetchHtmlWithFallback(
   targetUrl,
   headers,
   allowProxy = true,
-  rejectHomeRedirect = false,
-  checkCanonicalRedirect = true
+  rejectHomeRedirect = false
 ) {
   let status = 0;
   let cookies = "";
@@ -374,12 +376,7 @@ async function fetchHtmlWithFallback(
       }
       if (
         rejectHomeRedirect &&
-        isRedirectedToHomepage(
-          targetUrl,
-          res.url,
-          text,
-          checkCanonicalRedirect
-        )
+        isRedirectedToHomepage(targetUrl, res.url, text)
       ) {
         return { html: "", via: "redirected-home", status: 302, cookies: "" };
       }
@@ -406,14 +403,9 @@ async function fetchHtmlWithFallback(
         if (!is404Html(text) && !text.includes("Just a moment...")) {
           if (
             rejectHomeRedirect &&
-            isRedirectedToHomepage(targetUrl, "", text, checkCanonicalRedirect)
+            isRedirectedToHomepage(targetUrl, "", text)
           ) {
-            return {
-              html: "",
-              via: "redirected-home",
-              status: 302,
-              cookies: ""
-            };
+            continue;
           }
           return { html: text, via: "proxy", status: res.status, cookies: "" };
         }
@@ -1183,11 +1175,26 @@ function extractLegacyAndDirectMedia(
 ) {
   if (!pageHtml) return [];
 
+  const filterValidItems = (items) =>
+    items.filter((item) => {
+      try {
+        const u = new URL(item.url);
+        const h = u.hostname.replace(/^www\./, "").toLowerCase();
+        if (item.type === "hls" || item.type === "mp4") return true;
+        if (h === baseHost || h.includes("viet69")) {
+          return /(?:embed|player|play|video|stream|get\.|wp-content\/uploads)/i.test(
+            u.pathname + u.search
+          );
+        }
+        return true;
+      } catch (_) {
+        return false;
+      }
+    });
+
   const zones = [];
-  const articleMatch = pageHtml.match(/<article\b[\s\S]*?<\/article>/i);
-  if (articleMatch) {
-    zones.push(articleMatch[0]);
-  }
+  const articleMatches = pageHtml.match(/<article\b[\s\S]*?<\/article>/gi) || [];
+  zones.push(...articleMatches);
 
   const zoneRegex =
     /<(?:div|section)[^>]*class=["']?[^"'>]*(?:responsive-player|video-player|player-wrapper|entry-content|post-content|single-content|toro-play|video-embed|sv2-player|wp-video)[^"'>]*["']?[^>]*>[\s\S]{0,45000}?<\/(?:div|section)>/gi;
@@ -1203,24 +1210,14 @@ function extractLegacyAndDirectMedia(
     zones.push(`<iframe src="${mm[1]}"></iframe>`);
   }
 
-  const scopeHtml = zones.length > 0 ? zones.join("\n") : pageHtml;
-  const rawItems = parsePlayerHtml(scopeHtml, baseDomain);
+  if (zones.length > 0) {
+    const zoneItems = filterValidItems(
+      parsePlayerHtml(zones.join("\n"), baseDomain)
+    );
+    if (zoneItems.length > 0) return zoneItems;
+  }
 
-  return rawItems.filter((item) => {
-    try {
-      const u = new URL(item.url);
-      const h = u.hostname.replace(/^www\./, "").toLowerCase();
-      if (item.type === "hls" || item.type === "mp4") return true;
-      if (h === baseHost || h.includes("viet69")) {
-        return /(?:embed|player|play|video|stream|get\.|wp-content\/uploads)/i.test(
-          u.pathname + u.search
-        );
-      }
-      return true;
-    } catch (_) {
-      return false;
-    }
-  });
+  return filterValidItems(parsePlayerHtml(pageHtml, baseDomain));
 }
 
 async function resolveEmbedPage(iframeUrl, postLink) {
@@ -1516,21 +1513,10 @@ async function fetchViet69PlayerUrl({
   };
 }
 
-function extractTotalPagesFromHtml(
-  html = "",
-  currentPage = 1,
-  isMemberCat = false
-) {
+function extractTotalPagesFromHtml(html = "", currentPage = 1) {
   let maxPage = currentPage;
 
-  const navZoneMatches =
-    html.match(
-      /<(?:div|nav|ul)[^>]*class=["']?[^"'>]*(?:wp-pagenavi|pagination|nav-links|page-numbers|pagenavi|page-nav)[^"'>]*["']?[^>]*>[\s\S]{0,6000}?<\/(?:div|nav|ul)>/gi
-    ) || [];
-  const scopeHtml =
-    navZoneMatches.length > 0 ? navZoneMatches.join("\n") : html;
-
-  const ofMatch = scopeHtml.match(
+  const ofMatch = html.match(
     /(?:Page|Trang)\s+\d+\s+(?:of|trên|của|\/)\s+([\d,.]+)/i
   );
   if (ofMatch && ofMatch[1]) {
@@ -1547,10 +1533,9 @@ function extractTotalPagesFromHtml(
     /[?&](?:trang|page|paged)=(\d+)/gi
   ];
 
-  const targetToScan = isMemberCat ? `${scopeHtml}\n${html}` : scopeHtml;
   for (const pat of pagePatterns) {
     let m;
-    while ((m = pat.exec(targetToScan)) !== null) {
+    while ((m = pat.exec(html)) !== null) {
       const p = parseInt(m[1], 10);
       if (!isNaN(p) && p > maxPage && p < 100000) {
         maxPage = p;
@@ -1558,15 +1543,13 @@ function extractTotalPagesFromHtml(
     }
   }
 
-  if (navZoneMatches.length > 0) {
-    const numLinkRegex =
-      /<a\b[^>]*class=["']?[^"'>]*(?:page-numbers|page|larger|last)[^"'>]*["']?[^>]*>\s*([\d,.]+)\s*<\/a>/gi;
-    let nm;
-    while ((nm = numLinkRegex.exec(scopeHtml)) !== null) {
-      const p = parseInt(nm[1].replace(/[,.]/g, ""), 10);
-      if (!isNaN(p) && p > maxPage && p < 100000) {
-        maxPage = p;
-      }
+  const numLinkRegex =
+    /<a\b[^>]*class=["']?[^"'>]*(?:page-numbers|page|larger|last)[^"'>]*["']?[^>]*>\s*([\d,.]+)\s*<\/a>/gi;
+  let nm;
+  while ((nm = numLinkRegex.exec(html)) !== null) {
+    const p = parseInt(nm[1].replace(/[,.]/g, ""), 10);
+    if (!isNaN(p) && p > maxPage && p < 100000) {
+      maxPage = p;
     }
   }
 
@@ -1803,7 +1786,6 @@ function parseVideoListHtml(
   const isMemberCat =
     category === "video-cua-thanh-vien" || category === "bai-viet";
 
-  // Chỉ xóa header chính của trang (masthead / site-header), KHÔNG xóa <header class="entry-header"> bên trong từng bài viết <article>!
   let mainScope = html
     .replace(
       /<header[^>]+(?:id|class)=["']?[^"'>]*(?:masthead|site-header|main-header|header-main)[^"'>]*["']?[^>]*>[\s\S]*?<\/header>/gi,
@@ -1955,7 +1937,6 @@ function parseVideoListHtml(
     tryExtractFromBlock(b);
   }
 
-  // Quét bổ sung mọi đường dẫn /bai-viet/<slug> trên trang "Video của thành viên" để không bỏ sót bất kỳ bài viết nào
   if (isMemberCat) {
     const bvLinkRegex =
       /<a\b[^>]*href\s*=\s*["']([^"']*\/bai-viet\/([^"'/?#\s>]+)\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
@@ -2702,31 +2683,31 @@ export async function GET(req) {
       const tags = [];
       const debugInfo = { baseDomain, wpStatus: 0, htmlVia: "none" };
 
-      let fetchResult = await fetchHtmlWithFallback(
-        postLink,
-        reqHeaders,
-        true,
-        true
+      const barePostSlug = cleanSlug.replace(
+        /^(?:bai-viet|video-cua-thanh-vien)\//i,
+        ""
       );
+      const candidatePostUrls = [
+        ...new Set([
+          `${baseDomain}/${cleanSlug}/`,
+          `${baseDomain}/bai-viet/${barePostSlug}/`,
+          `${baseDomain}/${barePostSlug}/`,
+          `${baseDomain}/video-cua-thanh-vien/${barePostSlug}/`
+        ])
+      ];
 
-      if (!fetchResult.html) {
-        const barePostSlug = cleanSlug.replace(/^bai-viet\//i, "");
-        const altCandidates = cleanSlug.startsWith("bai-viet/")
-          ? [`${baseDomain}/${barePostSlug}/`]
-          : [`${baseDomain}/bai-viet/${barePostSlug}/`];
-
-        for (const altUrl of altCandidates) {
-          const altRes = await fetchHtmlWithFallback(
-            altUrl,
-            reqHeaders,
-            true,
-            true
-          );
-          if (altRes.html) {
-            fetchResult = altRes;
-            postLink = altUrl;
-            break;
-          }
+      let fetchResult = { html: "", via: "none", status: 0, cookies: "" };
+      for (const candidateUrl of candidatePostUrls) {
+        const resAttempt = await fetchHtmlWithFallback(
+          candidateUrl,
+          reqHeaders,
+          true,
+          true
+        );
+        if (resAttempt.html) {
+          fetchResult = resAttempt;
+          postLink = candidateUrl;
+          break;
         }
       }
 
@@ -2992,7 +2973,7 @@ export async function GET(req) {
           "all"
         );
         const items = sortVideoItems(rawItems, sortBy);
-        const totalPages = extractTotalPagesFromHtml(html, page, false);
+        const totalPages = extractTotalPagesFromHtml(html, page);
 
         if (items.length > 0) {
           return NextResponse.json(
@@ -3075,13 +3056,11 @@ export async function GET(req) {
       const urlList = [...candidateUrls].slice(0, 6);
       const parallelResults = await Promise.all(
         urlList.map(async (u) => {
-          // Luôn chặn redirect về trang chủ bằng finalUrl, nhưng với isMemberCat thì không chặn theo canonical
           const { html } = await fetchHtmlWithFallback(
             u,
             reqHeaders,
             true,
-            true,
-            !isMemberCat
+            true
           );
           if (!html) return null;
           const navCategories = extractNavCategories(
@@ -3096,11 +3075,7 @@ export async function GET(req) {
             cleanCat
           );
           if (rawItems.length < 2) return null;
-          const detectedPages = extractTotalPagesFromHtml(
-            html,
-            page,
-            isMemberCat
-          );
+          const detectedPages = extractTotalPagesFromHtml(html, page);
           return {
             items: sortVideoItems(rawItems, sortBy),
             totalPages: detectedPages,
@@ -3109,7 +3084,6 @@ export async function GET(req) {
         })
       );
 
-      // Ưu tiên chọn trang lưu trữ trả về nhiều trang phân trang và nhiều video nhất (tránh lấy nhầm widget ít video)
       const validArchives = parallelResults
         .filter((r) => r !== null)
         .sort((a, b) => {
@@ -3151,11 +3125,7 @@ export async function GET(req) {
           sortBy
         );
         if (sItems.length > 0) {
-          const sTotalPages = extractTotalPagesFromHtml(
-            searchHtml,
-            page,
-            false
-          );
+          const sTotalPages = extractTotalPagesFromHtml(searchHtml, page);
           return NextResponse.json(
             {
               items: sItems,
