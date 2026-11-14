@@ -97,9 +97,10 @@ const CATEGORY_MAP = {
   },
   "video-cua-thanh-vien": {
     paths: [
-      "video-cua-thanh-vien",
       "bai-viet",
+      "video-cua-thanh-vien",
       "category/video-cua-thanh-vien",
+      "category/bai-viet",
       "tag/video-cua-thanh-vien"
     ],
     keyword: "thành viên chia sẻ",
@@ -197,8 +198,6 @@ const SYSTEM_TITLES_BLACKLIST = [
   "thông tin cá nhân",
   "quên mật khẩu",
   "đổi mật khẩu",
-  "video thành viên",
-  "video của thành viên",
   "trang chủ"
 ];
 
@@ -301,7 +300,12 @@ function is404Html(html = "") {
   return false;
 }
 
-function isRedirectedToHomepage(requestedUrl = "", finalUrl = "", html = "") {
+function isRedirectedToHomepage(
+  requestedUrl = "",
+  finalUrl = "",
+  html = "",
+  checkCanonical = true
+) {
   try {
     const reqObj = new URL(requestedUrl);
     const reqPath = reqObj.pathname.replace(/^\/+|\/+$/g, "");
@@ -323,14 +327,16 @@ function isRedirectedToHomepage(requestedUrl = "", finalUrl = "", html = "") {
       }
     }
 
-    const canonicalMatch = html.match(
-      /<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i
-    );
-    if (canonicalMatch && canonicalMatch[1]) {
-      const canObj = new URL(canonicalMatch[1], requestedUrl);
-      const canPath = canObj.pathname.replace(/^\/+|\/+$/g, "");
-      if (!canPath && !reqObj.search) {
-        return true;
+    if (checkCanonical) {
+      const canonicalMatch = html.match(
+        /<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i
+      );
+      if (canonicalMatch && canonicalMatch[1]) {
+        const canObj = new URL(canonicalMatch[1], requestedUrl);
+        const canPath = canObj.pathname.replace(/^\/+|\/+$/g, "");
+        if (!canPath && !reqObj.search) {
+          return true;
+        }
       }
     }
   } catch (_) {}
@@ -341,7 +347,8 @@ async function fetchHtmlWithFallback(
   targetUrl,
   headers,
   allowProxy = true,
-  rejectHomeRedirect = false
+  rejectHomeRedirect = false,
+  checkCanonicalRedirect = true
 ) {
   let status = 0;
   let cookies = "";
@@ -367,7 +374,12 @@ async function fetchHtmlWithFallback(
       }
       if (
         rejectHomeRedirect &&
-        isRedirectedToHomepage(targetUrl, res.url, text)
+        isRedirectedToHomepage(
+          targetUrl,
+          res.url,
+          text,
+          checkCanonicalRedirect
+        )
       ) {
         return { html: "", via: "redirected-home", status: 302, cookies: "" };
       }
@@ -394,7 +406,7 @@ async function fetchHtmlWithFallback(
         if (!is404Html(text) && !text.includes("Just a moment...")) {
           if (
             rejectHomeRedirect &&
-            isRedirectedToHomepage(targetUrl, "", text)
+            isRedirectedToHomepage(targetUrl, "", text, checkCanonicalRedirect)
           ) {
             return {
               html: "",
@@ -1172,8 +1184,13 @@ function extractLegacyAndDirectMedia(
   if (!pageHtml) return [];
 
   const zones = [];
+  const articleMatch = pageHtml.match(/<article\b[\s\S]*?<\/article>/i);
+  if (articleMatch) {
+    zones.push(articleMatch[0]);
+  }
+
   const zoneRegex =
-    /<(?:article|div|section)[^>]*class=["']?[^"'>]*(?:responsive-player|video-player|player-wrapper|entry-content|post-content|single-content|toro-play|video-embed|sv2-player|wp-video)[^"'>]*["']?[^>]*>[\s\S]{0,30000}?<\/(?:article|div|section)>/gi;
+    /<(?:div|section)[^>]*class=["']?[^"'>]*(?:responsive-player|video-player|player-wrapper|entry-content|post-content|single-content|toro-play|video-embed|sv2-player|wp-video)[^"'>]*["']?[^>]*>[\s\S]{0,45000}?<\/(?:div|section)>/gi;
   let zm;
   while ((zm = zoneRegex.exec(pageHtml)) !== null) {
     zones.push(zm[0]);
@@ -1506,48 +1523,47 @@ function extractTotalPagesFromHtml(
 ) {
   let maxPage = currentPage;
 
-  if (isMemberCat) {
-    let memberMax = currentPage;
-    const memberPatterns = [
-      /\/bai-viet\/page\/(\d+)\/?/gi,
-      /\/video-cua-thanh-vien\/page\/(\d+)\/?/gi,
-      /[?&](?:trang|paged)=(\d+)/gi
-    ];
-    for (const pat of memberPatterns) {
-      let m;
-      while ((m = pat.exec(html)) !== null) {
-        const p = parseInt(m[1], 10);
-        if (!isNaN(p) && p > memberMax && p < 500) {
-          memberMax = p;
-        }
-      }
-    }
-    return Math.max(1, memberMax);
-  }
-
-  const navZoneMatch = html.match(
-    /<(?:div|nav|ul)[^>]*class=["']?[^"'>]*(?:wp-pagenavi|pagination|nav-links|page-numbers|pagenavi|page-nav)[^"'>]*["']?[^>]*>[\s\S]{0,5000}?<\/(?:div|nav|ul)>/i
-  );
-  const scopeHtml = navZoneMatch ? navZoneMatch[0] : html;
+  const navZoneMatches =
+    html.match(
+      /<(?:div|nav|ul)[^>]*class=["']?[^"'>]*(?:wp-pagenavi|pagination|nav-links|page-numbers|pagenavi|page-nav)[^"'>]*["']?[^>]*>[\s\S]{0,6000}?<\/(?:div|nav|ul)>/gi
+    ) || [];
+  const scopeHtml =
+    navZoneMatches.length > 0 ? navZoneMatches.join("\n") : html;
 
   const ofMatch = scopeHtml.match(
     /(?:Page|Trang)\s+\d+\s+(?:of|trên|của|\/)\s+([\d,.]+)/i
   );
   if (ofMatch && ofMatch[1]) {
     const num = parseInt(ofMatch[1].replace(/[,.]/g, ""), 10);
-    if (!isNaN(num) && num >= currentPage) {
-      return num;
+    if (!isNaN(num) && num >= currentPage && num < 100000) {
+      maxPage = Math.max(maxPage, num);
     }
   }
 
   const pagePatterns = [
+    /\/bai-viet\/page\/(\d+)\/?/gi,
+    /\/video-cua-thanh-vien\/page\/(\d+)\/?/gi,
     /\/page\/(\d+)\/?/gi,
     /[?&](?:trang|page|paged)=(\d+)/gi
   ];
+
+  const targetToScan = isMemberCat ? `${scopeHtml}\n${html}` : scopeHtml;
   for (const pat of pagePatterns) {
     let m;
-    while ((m = pat.exec(scopeHtml)) !== null) {
+    while ((m = pat.exec(targetToScan)) !== null) {
       const p = parseInt(m[1], 10);
+      if (!isNaN(p) && p > maxPage && p < 100000) {
+        maxPage = p;
+      }
+    }
+  }
+
+  if (navZoneMatches.length > 0) {
+    const numLinkRegex =
+      /<a\b[^>]*class=["']?[^"'>]*(?:page-numbers|page|larger|last)[^"'>]*["']?[^>]*>\s*([\d,.]+)\s*<\/a>/gi;
+    let nm;
+    while ((nm = numLinkRegex.exec(scopeHtml)) !== null) {
+      const p = parseInt(nm[1].replace(/[,.]/g, ""), 10);
       if (!isNaN(p) && p > maxPage && p < 100000) {
         maxPage = p;
       }
@@ -1568,10 +1584,12 @@ function learnSortParamsFromHtml(html = "") {
     const qs = href.split("?")[1]?.split("#")[0] || "";
     if (!qs) continue;
 
-    if (text === "mới nhất") sortParamCache.set("latest", qs);
-    else if (text === "lượt xem") sortParamCache.set("views", qs);
-    else if (text === "lượt thích") sortParamCache.set("likes", qs);
-    else if (text === "bình luận") sortParamCache.set("comments", qs);
+    if (text.includes("mới nhất")) sortParamCache.set("latest", qs);
+    else if (text.includes("lượt xem") || text.includes("xem nhiều"))
+      sortParamCache.set("views", qs);
+    else if (text.includes("lượt thích") || text.includes("yêu thích"))
+      sortParamCache.set("likes", qs);
+    else if (text.includes("bình luận")) sortParamCache.set("comments", qs);
   }
 }
 
@@ -1620,7 +1638,8 @@ function extractNavCategories(html = "", baseDomain = "", baseHost = "") {
 
       if (
         labelSlug.includes("video-cua-thanh-vien") ||
-        labelSlug === "video-thanh-vien"
+        labelSlug === "video-thanh-vien" ||
+        rawPath === "bai-viet"
       ) {
         if (rawPath.includes("thanh-vien") || rawPath.includes("bai-viet")) {
           navPathCache.set("video-cua-thanh-vien", rawPath);
@@ -1659,22 +1678,35 @@ function extractNavCategories(html = "", baseDomain = "", baseHost = "") {
   return categories;
 }
 
-function extractThumbnailFromBlock(block = "", baseDomain = "") {
+function extractThumbnailFromBlock(
+  block = "",
+  baseDomain = "",
+  allowThemeThumb = false
+) {
   const isInvalidThumbUrl = (u = "") => {
     const lower = u.toLowerCase();
-    return (
+    if (
       !u ||
       lower.startsWith("data:") ||
       lower.includes("blank.gif") ||
-      lower.includes("placeholder") ||
-      lower.includes("logo") ||
       lower.includes("favicon") ||
       lower.includes("avatar") ||
-      lower.includes("list-top-images") ||
-      lower.includes("/themes/") ||
-      lower.includes("/plugins/") ||
       /\.(?:js|css|json|xml|woff2?|ttf)(?:\?|$)/i.test(lower)
-    );
+    ) {
+      return true;
+    }
+    if (!allowThemeThumb) {
+      if (
+        lower.includes("placeholder") ||
+        lower.includes("logo") ||
+        lower.includes("list-top-images") ||
+        lower.includes("/themes/") ||
+        lower.includes("/plugins/")
+      ) {
+        return true;
+      }
+    }
+    return false;
   };
 
   const imgTagScope =
@@ -1771,9 +1803,12 @@ function parseVideoListHtml(
   const isMemberCat =
     category === "video-cua-thanh-vien" || category === "bai-viet";
 
+  // Chỉ xóa header chính của trang (masthead / site-header), KHÔNG xóa <header class="entry-header"> bên trong từng bài viết <article>!
   let mainScope = html
-    .replace(/<header\b[\s\S]*?<\/header>/gi, "")
-    .replace(/<nav\b[\s\S]*?<\/nav>/gi, "")
+    .replace(
+      /<header[^>]+(?:id|class)=["']?[^"'>]*(?:masthead|site-header|main-header|header-main)[^"'>]*["']?[^>]*>[\s\S]*?<\/header>/gi,
+      ""
+    )
     .replace(/<footer\b[\s\S]*?<\/footer>/gi, "")
     .replace(/<aside\b[\s\S]*?<\/aside>/gi, "");
 
@@ -1784,21 +1819,18 @@ function parseVideoListHtml(
     const cutIdx = mainScope.search(
       /<(?:aside|div|footer)[^>]+(?:id|class)=["']?[^"'>]*(?:sidebar|secondary|widget-area|site-footer|footer-widgets)/i
     );
-    if (cutIdx > 1500) {
+    if (cutIdx > 2500) {
       mainScope = mainScope.slice(0, cutIdx);
     }
   }
 
   const articleBlocks = mainScope.match(/<article[\s\S]*?<\/article>/gi) || [];
   const splitDivBlocks = mainScope.split(
-    /(?=<div[^>]+class=["']?[^"'>]*(?:post-|loop-video|video-item|clip-item|entry-item|item-video|col-video|type-bai-viet|video-block|member-video|col-md-|col-sm-|col-6|item\b)[^"'>]*["']?)/i
+    /(?=<(?:div|li)[^>]+class=["']?[^"'>]*(?:post-|loop-video|video-item|clip-item|entry-item|item-video|col-video|type-bai-viet|bai-viet|video-block|member-video|col-md-|col-sm-|col-6|item\b)[^"'>]*["']?)/i
   );
   const combinedBlocks = [...articleBlocks, ...splitDivBlocks];
 
   const tryExtractFromBlock = (block) => {
-    const realThumb = extractThumbnailFromBlock(block, baseDomain);
-    if (!realThumb) return;
-
     const aTagRegex =
       /<a\b[^>]*href\s*=\s*(?:["']([^"']+)["']|([^\s>"']+))[^>]*>([\s\S]*?)<\/a>/gi;
     let chosenUrl = null;
@@ -1859,6 +1891,14 @@ function parseVideoListHtml(
       return;
     }
 
+    const realThumb =
+      extractThumbnailFromBlock(block, baseDomain, false) ||
+      (isMemberCat || isBvSlug
+        ? extractThumbnailFromBlock(block, baseDomain, true) || FALLBACK_THUMB
+        : "");
+
+    if (!realThumb) return;
+
     const titleFromA = chosenATag.match(/\btitle=["']([^"']+)["']/i);
     const titleMatch =
       titleFromA ||
@@ -1913,6 +1953,65 @@ function parseVideoListHtml(
 
   for (const b of combinedBlocks) {
     tryExtractFromBlock(b);
+  }
+
+  // Quét bổ sung mọi đường dẫn /bai-viet/<slug> trên trang "Video của thành viên" để không bỏ sót bất kỳ bài viết nào
+  if (isMemberCat) {
+    const bvLinkRegex =
+      /<a\b[^>]*href\s*=\s*["']([^"']*\/bai-viet\/([^"'/?#\s>]+)\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let bm;
+    while ((bm = bvLinkRegex.exec(mainScope)) !== null) {
+      const subSlug = bm[2].trim();
+      if (!subSlug || subSlug === "page" || /^\d+$/.test(subSlug)) continue;
+      const fullBvSlug = `bai-viet/${subSlug}`;
+      if (seen.has(fullBvSlug) || seen.has(subSlug)) continue;
+
+      const startPos = Math.max(0, bm.index - 350);
+      const endPos = Math.min(
+        mainScope.length,
+        bm.index + bm[0].length + 550
+      );
+      const ctx = mainScope.slice(startPos, endPos);
+
+      const titleAttr = bm[0].match(/\btitle=["']([^"']+)["']/i);
+      const innerTxt = cleanText(bm[3] || "");
+      const hTitle = ctx.match(/<h[1-5][^>]*>([\s\S]*?)<\/h[1-5]>/i);
+      const resolvedTitle = (
+        (titleAttr && cleanText(titleAttr[1])) ||
+        (innerTxt.length > 3 ? innerTxt : "") ||
+        (hTitle && cleanText(hTitle[1])) ||
+        subSlug.replace(/-/g, " ")
+      ).replace(/\s*[-|–]\s*Viet69.*$/i, "");
+
+      if (!resolvedTitle || isSystemLinkOrTitle(fullBvSlug, resolvedTitle)) {
+        continue;
+      }
+
+      const thumb =
+        extractThumbnailFromBlock(bm[0], baseDomain, true) ||
+        extractThumbnailFromBlock(ctx, baseDomain, true) ||
+        FALLBACK_THUMB;
+
+      const stats = extractStatsFromBlock(ctx);
+      seen.add(fullBvSlug);
+      seen.add(subSlug);
+
+      allCandidates.push({
+        id: fullBvSlug,
+        slug: fullBvSlug,
+        title: resolvedTitle,
+        category: "video-cua-thanh-vien",
+        isOriginalBv: true,
+        thumbnail: thumb,
+        thumb,
+        poster: thumb,
+        image: thumb,
+        duration: "",
+        views: stats.views,
+        comments: stats.comments,
+        likes: stats.likes
+      });
+    }
   }
 
   if (allCandidates.length < 4) {
@@ -2973,12 +3072,14 @@ export async function GET(req) {
         addCandidateWithPagination(bareSlug);
       }
 
-      const urlList = [...candidateUrls].slice(0, 5);
+      const urlList = [...candidateUrls].slice(0, 6);
       const parallelResults = await Promise.all(
         urlList.map(async (u) => {
+          // Luôn chặn redirect về trang chủ bằng finalUrl, nhưng với isMemberCat thì không chặn theo canonical
           const { html } = await fetchHtmlWithFallback(
             u,
             reqHeaders,
+            true,
             true,
             !isMemberCat
           );
@@ -2995,23 +3096,37 @@ export async function GET(req) {
             cleanCat
           );
           if (rawItems.length < 2) return null;
+          const detectedPages = extractTotalPagesFromHtml(
+            html,
+            page,
+            isMemberCat
+          );
           return {
             items: sortVideoItems(rawItems, sortBy),
-            totalPages: extractTotalPagesFromHtml(html, page, isMemberCat),
+            totalPages: detectedPages,
             categories: navCategories
           };
         })
       );
 
-      const validArchive = parallelResults.find((r) => r !== null);
-      if (validArchive) {
+      // Ưu tiên chọn trang lưu trữ trả về nhiều trang phân trang và nhiều video nhất (tránh lấy nhầm widget ít video)
+      const validArchives = parallelResults
+        .filter((r) => r !== null)
+        .sort((a, b) => {
+          const scoreA = a.items.length + (a.totalPages > 1 ? 100 : 0);
+          const scoreB = b.items.length + (b.totalPages > 1 ? 100 : 0);
+          return scoreB - scoreA;
+        });
+
+      const bestArchive = validArchives[0] || null;
+      if (bestArchive) {
         return NextResponse.json(
           {
-            items: validArchive.items,
+            items: bestArchive.items,
             page,
-            totalPages: validArchive.totalPages,
-            total: validArchive.totalPages * validArchive.items.length,
-            categories: validArchive.categories
+            totalPages: bestArchive.totalPages,
+            total: bestArchive.totalPages * bestArchive.items.length,
+            categories: bestArchive.categories
           },
           { headers: CORS }
         );
@@ -3039,7 +3154,7 @@ export async function GET(req) {
           const sTotalPages = extractTotalPagesFromHtml(
             searchHtml,
             page,
-            isMemberCat
+            false
           );
           return NextResponse.json(
             {
