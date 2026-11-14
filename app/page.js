@@ -6,8 +6,7 @@ import { getSource } from "@/config/site";
 
 const MAIN_CATEGORIES = [
   { name: "Tất cả", slug: "all" },
-  { name: "Phim QMH", slug: "qmh-movie", badge: "Hot" },
-  { name: "Phim Việt mới", slug: "phim-sex-viet-moi" },
+  { name: "Phim Việt mới", slug: "phim-sex-viet-moi", badge: "Hot" },
   {
     name: "Video thành viên",
     slug: "video-cua-thanh-vien",
@@ -41,8 +40,8 @@ const SORT_OPTIONS = [
   { id: "comments", label: "Bình luận" }
 ];
 
-const STATE_STORAGE_KEY = "videosite_browse_state_v1";
-const CACHE_STORAGE_KEY = "videosite_list_cache_v9";
+const STATE_STORAGE_KEY = "videosite_browse_state_v2";
+const CACHE_STORAGE_KEY = "videosite_list_cache_v10";
 const SCROLL_STORAGE_KEY = "videosite_scroll_y_v1";
 
 function buildPagination(currentPage, totalPages) {
@@ -100,8 +99,9 @@ function getInitialBrowseState() {
       sp.has("page") || sp.has("category") || sp.has("sort") || sp.has("q");
 
     if (hasUrlParams) {
+      const cat = sp.get("category") || "all";
       return {
-        category: sp.get("category") || "all",
+        category: cat === "qmh-movie" ? "all" : cat,
         page: Math.max(1, parseInt(sp.get("page") || "1", 10) || 1),
         sortBy: sp.get("sort") || "latest",
         q: sp.get("q") || ""
@@ -111,8 +111,9 @@ function getInitialBrowseState() {
     const saved = sessionStorage.getItem(STATE_STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
+      const cat = parsed.category || "all";
       return {
-        category: parsed.category || "all",
+        category: cat === "qmh-movie" ? "all" : cat,
         page: Math.max(1, parseInt(parsed.page || "1", 10) || 1),
         sortBy: parsed.sortBy || "latest",
         q: parsed.q || ""
@@ -121,76 +122,6 @@ function getInitialBrowseState() {
   } catch (_) {}
 
   return { category: "all", page: 1, sortBy: "latest", q: "" };
-}
-
-async function fetchQmhClientSideFallback(page = 1, q = "") {
-  const targetPageUrl = `https://qmhv3.top/?tab=movie&category=movie${
-    page > 1 ? `&page=${page}` : ""
-  }${q ? `&q=${encodeURIComponent(q)}` : ""}`;
-
-  const proxyUrls = [
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetPageUrl)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetPageUrl)}`
-  ];
-
-  for (const url of proxyUrls) {
-    try {
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) continue;
-      let text = await res.text();
-      if (!text || text.length < 200) continue;
-
-      for (let i = 0; i < 2; i++) {
-        text = text.replace(/\\"/g, '"').replace(/\\\//g, "/");
-      }
-
-      const items = [];
-      const seen = new Set();
-      const slugRegex = /"slug"\s*:\s*"([a-zA-Z0-9_-]{5,140})"/g;
-      let m;
-      while ((m = slugRegex.exec(text)) !== null) {
-        const s = m[1];
-        if (seen.has(s) || /banner|casino|crash|dice|slots|idol-live/i.test(s)) {
-          continue;
-        }
-        const chunk = text.slice(
-          Math.max(0, m.index - 500),
-          Math.min(text.length, m.index + 900)
-        );
-        const titleM = chunk.match(/"(?:title|name)"\s*:\s*"([^"]{3,220})"/i);
-        const thumbM = chunk.match(
-          /"(?:thumbnail|thumb|poster|image|cover)"\s*:\s*"([^"]{5,400})"/i
-        );
-        if (titleM && thumbM) {
-          let img = thumbM[1];
-          if (img.startsWith("/")) img = `https://qmhv3.top${img}`;
-          if (!img.startsWith("http") || /logo|banner|favicon/i.test(img)) {
-            continue;
-          }
-          seen.add(s);
-          const fullSlug = `qmh__${s}`;
-          items.push({
-            id: fullSlug,
-            slug: fullSlug,
-            title: titleM[1],
-            category: "qmh-movie",
-            thumbnail: img,
-            thumb: img,
-            poster: img,
-            image: img,
-            views: "0",
-            comments: "0",
-            likes: "0"
-          });
-        }
-      }
-
-      if (items.length > 0) {
-        return { items, totalPages: page + 5 };
-      }
-    } catch (_) {}
-  }
-  return null;
 }
 
 export default function HomePage() {
@@ -291,11 +222,10 @@ export default function HomePage() {
         const rawCache = sessionStorage.getItem(CACHE_STORAGE_KEY);
         if (rawCache) {
           const parsedCache = JSON.parse(rawCache);
-          const minValidItems = category === "qmh-movie" ? 8 : 1;
           if (
             parsedCache.key === cacheKey &&
             Array.isArray(parsedCache.items) &&
-            parsedCache.items.length >= minValidItems &&
+            parsedCache.items.length > 0 &&
             Date.now() - (parsedCache.ts || 0) < 5 * 60 * 1000
           ) {
             setItems(parsedCache.items);
@@ -345,25 +275,14 @@ export default function HomePage() {
 
         if (!isMounted) return;
 
-        let loadedItems = Array.isArray(data?.items) ? data.items : [];
-        let loadedTotalPages = Math.max(1, Number(data?.totalPages) || 1);
+        const loadedItems = Array.isArray(data?.items) ? data.items : [];
+        const loadedTotalPages = Math.max(1, Number(data?.totalPages) || 1);
         const loadedCats = Array.isArray(data?.categories)
           ? data.categories
           : [];
 
         if (data?._debug) {
           setListDebug(data._debug);
-        }
-
-        if (category === "qmh-movie" && loadedItems.length < 5) {
-          const clientFallback = await fetchQmhClientSideFallback(page, q);
-          if (
-            clientFallback &&
-            clientFallback.items.length > loadedItems.length
-          ) {
-            loadedItems = clientFallback.items;
-            loadedTotalPages = clientFallback.totalPages;
-          }
         }
 
         setItems(loadedItems);
